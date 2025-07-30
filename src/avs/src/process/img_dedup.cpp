@@ -1,0 +1,105 @@
+#include "avs/img_dedup.h"
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <cv_bridge/cv_bridge.h>
+#include <rclcpp/rclcpp.hpp>
+#include <yaml-cpp/yaml.h>
+#include <filesystem>
+#include <numeric>
+#include <chrono>
+
+namespace fs = std::filesystem;
+
+namespace avs
+{
+
+ImgDeduplicator::ImgDeduplicator(const std::string& output_dir, const std::string& config_path)
+: output_dir_(output_dir), first_image_(true)
+{
+  fs::create_directories(output_dir_);
+  loadConfig(config_path);
+}
+
+void ImgDeduplicator::loadConfig(const std::string& config_path)
+{
+  YAML::Node config = YAML::LoadFile(config_path);
+  hamming_threshold_ = config["hamming_threshold"] ? config["hamming_threshold"].as<int>() : 2;
+  img_format_ = config["img_format"] ? config["img_format"].as<std::string>() : "jpg";
+  img_quality_ = config["img_quality"] ? config["img_quality"].as<int>() : 95;
+
+  if (img_format_ == "jpg" || img_format_ == "jpeg")
+  {
+    write_params_ = {cv::IMWRITE_JPEG_QUALITY, img_quality_};
+    extension_ = ".jpg";
+  }
+  else if (img_format_ == "png")
+  {
+    write_params_ = {cv::IMWRITE_PNG_COMPRESSION, img_quality_};
+    extension_ = ".png";
+  }
+  else
+  {
+    RCLCPP_WARN(rclcpp::get_logger("img_dedup"), "Unsupported format '%s', defaulting to jpg", img_format_.c_str());
+    write_params_ = {cv::IMWRITE_JPEG_QUALITY, 95};
+    extension_ = ".jpg";
+  }
+}
+
+cv::Mat ImgDeduplicator::rosImgToCvMat(const sensor_msgs::msg::Image& img_msg)
+{
+  return cv_bridge::toCvCopy(img_msg, "bgr8")->image;
+}
+
+std::vector<bool> ImgDeduplicator::computePhash(const cv::Mat& img)
+{
+  cv::Mat gray;
+  cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+  cv::resize(gray, gray, cv::Size(32, 32));
+  gray.convertTo(gray, CV_32F);
+  cv::Mat dct_image;
+  cv::dct(gray, dct_image);
+
+  std::vector<float> vals;
+  for (int i = 0; i < 8; ++i)
+    for (int j = 0; j < 8; ++j)
+      vals.push_back(dct_image.at<float>(i, j));
+
+  float mean = std::accumulate(vals.begin() + 1, vals.end(), 0.0f) / 63.0f;
+  std::vector<bool> hash;
+  for (float v : vals)
+    hash.push_back(v >= mean);
+
+  return hash;
+}
+
+int ImgDeduplicator::hammingDistance(const std::vector<bool>& hash1, const std::vector<bool>& hash2)
+{
+  int dist = 0;
+  for (size_t i = 0; i < hash1.size(); ++i)
+    if (hash1[i] != hash2[i]) ++dist;
+  return dist;
+}
+
+std::string ImgDeduplicator::getTimestampedFilename()
+{
+  auto t = std::chrono::system_clock::now().time_since_epoch();
+  return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(t).count());
+}
+
+bool ImgDeduplicator::isUniqueAndStore(const sensor_msgs::msg::Image& img_msg)
+{
+  cv::Mat img = rosImgToCvMat(img_msg);
+  auto hash = computePhash(img);
+
+  if (first_image_ || hammingDistance(last_hash_, hash) > hamming_threshold_)
+  {
+    std::string out_path = output_dir_ + "/" + getTimestampedFilename() + extension_;
+    cv::imwrite(out_path, img, write_params_);
+    last_hash_ = hash;
+    first_image_ = false;
+    return true;
+  }
+  return false;
+}
+
+} // namespace avs

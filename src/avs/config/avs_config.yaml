@@ -1,0 +1,8 @@
+storage:
+  ssd_dir: /avsData/ssd
+  hdd_dir: /avsData/hdd
+
+dedup:
+  hamming_threshold: 2
+  img_format: "jpg"     # "jpg" or "png"
+  img_quality: 95       # 0–100 for jpg, 0–9 for png
