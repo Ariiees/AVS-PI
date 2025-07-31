@@ -2,7 +2,14 @@ storage:
   ssd_dir: /avsData/ssd
   hdd_dir: /avsData/hdd
 
-dedup:
+image_dedup:    # Deduplicate image and save each image to ssd
   hamming_threshold: 2
   img_format: "jpg"     # "jpg" or "png"
   img_quality: 95       # 0–100 for jpg, 0–9 for png
+
+image_compress:  # Compress image sequence and save to hdd
+  fps: 10               # KITTI image publish rate is 10Hz, adjust it according to your camera frequency
+  segment_duration_sec: 1   # Suggest segement length
+
+lidar_downsample:  # Downsample raw lidar point cloud with voxel grid filter
+  leaf_size: 0.2        # 0 to 0.3 recommand

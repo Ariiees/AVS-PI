@@ -1,12 +1,14 @@
-#include "avs/img_dedup.h"
+#include "img_dedup.h"
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <yaml-cpp/yaml.h>
 #include <filesystem>
 #include <numeric>
 #include <chrono>
+#include <bitset>
+
 
 namespace fs = std::filesystem;
 
@@ -22,7 +24,9 @@ ImgDeduplicator::ImgDeduplicator(const std::string& output_dir, const std::strin
 
 void ImgDeduplicator::loadConfig(const std::string& config_path)
 {
-  YAML::Node config = YAML::LoadFile(config_path);
+  YAML::Node root = YAML::LoadFile(config_path);
+  YAML::Node config = root["image_dedup"];
+
   hamming_threshold_ = config["hamming_threshold"] ? config["hamming_threshold"].as<int>() : 2;
   img_format_ = config["img_format"] ? config["img_format"].as<std::string>() : "jpg";
   img_quality_ = config["img_quality"] ? config["img_quality"].as<int>() : 95;
@@ -43,6 +47,9 @@ void ImgDeduplicator::loadConfig(const std::string& config_path)
     write_params_ = {cv::IMWRITE_JPEG_QUALITY, 95};
     extension_ = ".jpg";
   }
+
+  std::cout << "[VideoCompressor] Loaded config: image formace = " << img_format_
+            << ", image quality = " << img_quality_ << "\n";
 }
 
 cv::Mat ImgDeduplicator::rosImgToCvMat(const sensor_msgs::msg::Image& img_msg)
@@ -50,40 +57,47 @@ cv::Mat ImgDeduplicator::rosImgToCvMat(const sensor_msgs::msg::Image& img_msg)
   return cv_bridge::toCvCopy(img_msg, "bgr8")->image;
 }
 
-std::vector<bool> ImgDeduplicator::computePhash(const cv::Mat& img)
+std::bitset<64> ImgDeduplicator::computePhash(const cv::Mat& img)
 {
   cv::Mat gray;
   cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
   cv::resize(gray, gray, cv::Size(32, 32));
   gray.convertTo(gray, CV_32F);
+
   cv::Mat dct_image;
   cv::dct(gray, dct_image);
 
+  // Extract top-left 8x8 block
+  cv::Mat dct_block = dct_image(cv::Rect(0, 0, 8, 8)).clone();
+
+  // Flatten the block
   std::vector<float> vals;
+  vals.reserve(64);
   for (int i = 0; i < 8; ++i)
     for (int j = 0; j < 8; ++j)
-      vals.push_back(dct_image.at<float>(i, j));
+      vals.push_back(dct_block.at<float>(i, j));
 
+  // Compute mean excluding the DC term
   float mean = std::accumulate(vals.begin() + 1, vals.end(), 0.0f) / 63.0f;
-  std::vector<bool> hash;
-  for (float v : vals)
-    hash.push_back(v >= mean);
+
+  // Compute hash bits
+  std::bitset<64> hash;
+  for (size_t i = 1; i < vals.size(); ++i)
+    hash[i] = vals[i] >= mean;
+  hash[0] = 0; // DC component
 
   return hash;
 }
 
-int ImgDeduplicator::hammingDistance(const std::vector<bool>& hash1, const std::vector<bool>& hash2)
+int ImgDeduplicator::hammingDistance(const std::bitset<64>& h1, const std::bitset<64>& h2)
 {
-  int dist = 0;
-  for (size_t i = 0; i < hash1.size(); ++i)
-    if (hash1[i] != hash2[i]) ++dist;
-  return dist;
+  return (h1 ^ h2).count();
 }
 
 std::string ImgDeduplicator::getTimestampedFilename()
 {
-  auto t = std::chrono::system_clock::now().time_since_epoch();
-  return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(t).count());
+  auto now = std::chrono::system_clock::now().time_since_epoch();
+  return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
 }
 
 bool ImgDeduplicator::isUniqueAndStore(const sensor_msgs::msg::Image& img_msg)

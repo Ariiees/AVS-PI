@@ -8,6 +8,6 @@ def generate_launch_description():
             executable='image_subscriber',
             name='image_sub_node',
             output='screen',
-            parameters=[{'output_dir': '/path/to/output'}]
+            parameters=[{'output_dir': '/home/avs/DATA/img'}]
         )
     ])
