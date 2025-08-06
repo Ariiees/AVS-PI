@@ -1,4 +1,4 @@
-#include "lidar_downsample.h"
+#include "avs/lidar_downsample.h"
 #include <pcl/filters/voxel_grid.h>
 #include <yaml-cpp/yaml.h>
 #include <iostream>

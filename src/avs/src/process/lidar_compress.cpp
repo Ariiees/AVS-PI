@@ -1,4 +1,4 @@
-#include "lidar_compress.h"
+#include "avs/lidar_compress.h"
 #include <filesystem>
 #include <fstream>
 #include <iomanip>

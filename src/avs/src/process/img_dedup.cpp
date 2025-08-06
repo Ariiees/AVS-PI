@@ -1,4 +1,4 @@
-#include "img_dedup.h"
+#include "avs/img_dedup.h"
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <cv_bridge/cv_bridge.hpp>

@@ -3,8 +3,8 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_types.h>
 #include <chrono>
-#include "lidar_downsample.h"
-#include "lidar_compress.h"
+#include "avs/lidar_downsample.h"
+#include "avs/lidar_compress.h"
 
 using std::placeholders::_1;
 

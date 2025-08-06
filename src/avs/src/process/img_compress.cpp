@@ -1,4 +1,4 @@
-#include "img_compress.h"
+#include "avs/img_compress.h"
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 

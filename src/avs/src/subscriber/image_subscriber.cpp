@@ -1,7 +1,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
-#include "img_dedup.h"
-#include "img_compress.h"
+#include "avs/img_dedup.h"
+#include "avs/img_compress.h"
 #include <cv_bridge/cv_bridge.hpp>
 #include <chrono>
 
