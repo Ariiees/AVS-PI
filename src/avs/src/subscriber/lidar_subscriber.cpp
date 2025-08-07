@@ -5,6 +5,7 @@
 #include <chrono>
 #include "avs/lidar_downsample.h"
 #include "avs/lidar_compress.h"
+#include "avs/common.h"
 
 using std::placeholders::_1;
 
@@ -22,7 +23,7 @@ public:
 
     std::string lidar_topic = this->get_parameter("lidar_topic").as_string();
     std::string config_path = this->get_parameter("config_path").as_string();
-    std::string output_dir = this->get_parameter("output_dir").as_string();
+    output_dir = this->get_parameter("output_dir").as_string();
 
     downsampler_ = std::make_shared<LidarDownsampler>(config_path);
     compressor_ = std::make_shared<LidarCompressor>(output_dir);
@@ -42,7 +43,8 @@ private:
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr downsampled = downsampler_->downsample(pcl_cloud);
 
-    compressor_->saveAsLAZ(downsampled);
+    std::string filename = avs::getTimestampFilename(this->output_dir, ".laz");
+    compressor_->saveAsLAZ(downsampled, filename);
 
     auto end = std::chrono::steady_clock::now();
     auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
@@ -53,6 +55,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
   std::shared_ptr<LidarDownsampler> downsampler_;
   std::shared_ptr<LidarCompressor> compressor_;
+  std::string output_dir;
 };
 
 } // namespace avs

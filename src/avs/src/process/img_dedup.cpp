@@ -1,4 +1,5 @@
 #include "avs/img_dedup.h"
+#include "avs/common.h"
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <cv_bridge/cv_bridge.hpp>
@@ -94,12 +95,6 @@ int ImgDeduplicator::hammingDistance(const std::bitset<64>& h1, const std::bitse
   return (h1 ^ h2).count();
 }
 
-std::string ImgDeduplicator::getTimestampedFilename()
-{
-  auto now = std::chrono::system_clock::now().time_since_epoch();
-  return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
-}
-
 bool ImgDeduplicator::isUniqueAndStore(const sensor_msgs::msg::Image& img_msg)
 {
   cv::Mat img = rosImgToCvMat(img_msg);
@@ -107,7 +102,7 @@ bool ImgDeduplicator::isUniqueAndStore(const sensor_msgs::msg::Image& img_msg)
 
   if (first_image_ || hammingDistance(last_hash_, hash) > hamming_threshold_)
   {
-    std::string out_path = output_dir_ + "/" + getTimestampedFilename() + extension_;
+    std::string out_path = avs::getTimestampFilename(output_dir_, extension_);
     cv::imwrite(out_path, img, write_params_);
     last_hash_ = hash;
     first_image_ = false;

@@ -82,11 +82,29 @@ ament_target_dependencies(fs_img_write
   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
 )  
 
+# ========== File System Benchmark Lidar Write ==========
+add_executable(fs_lidar_write
+  src/benchmark/lidar_write_fs_benchmark.cpp
+  src/process/lidar_compress.cpp
+)
+
+target_link_libraries(fs_lidar_write
+  ${PCL_LIBRARIES}
+  ${PCL_IO_LIBRARIES}
+  ${LASZIP_LIBRARY}
+  yaml-cpp
+)
+
+ament_target_dependencies(fs_lidar_write
+   rclcpp sensor_msgs pcl_conversions yaml-cpp
+)  
+
 # ========== Install Targets ==========
 install(TARGETS
   image_subscriber
   lidar_subscriber
   fs_img_write
+  fs_lidar_write
   DESTINATION lib/${PROJECT_NAME}
 )
 

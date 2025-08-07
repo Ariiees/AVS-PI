@@ -1,4 +1,5 @@
 #include "avs/lidar_compress.h"
+#include "avs/common.h"
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -17,18 +18,9 @@ LidarCompressor::LidarCompressor(const std::string& output_dir)
   fs::create_directories(output_dir_);
 }
 
-
-std::string LidarCompressor::getTimestampFilename(const std::string& extension)
+void LidarCompressor::saveAsBin(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud, const std::string &filename)
 {
-  auto now = std::chrono::system_clock::now().time_since_epoch();
-  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
-  return output_dir_ + "/" + std::to_string(ms) + extension;
-}
-
-void LidarCompressor::saveAsBin(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud)
-{
-  std::string path = getTimestampFilename(".bin");
-  std::ofstream ofs(path, std::ios::binary);
+  std::ofstream ofs(filename, std::ios::binary);
   for (const auto& pt : cloud->points) {
     ofs.write(reinterpret_cast<const char*>(&pt.x), sizeof(float));
     ofs.write(reinterpret_cast<const char*>(&pt.y), sizeof(float));
@@ -38,10 +30,8 @@ void LidarCompressor::saveAsBin(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr&
   ofs.close();
 }
 
-void LidarCompressor::saveAsLAZ(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud)
+void LidarCompressor::saveAsLAZ(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud, const std::string &filename)
 {
-  std::string path = getTimestampFilename(".laz");
-
   laszip_POINTER writer;
   laszip_create(&writer);
 
@@ -54,7 +44,7 @@ void LidarCompressor::saveAsLAZ(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr&
   laszip_point* point;
   laszip_get_point_pointer(writer, &point);
 
-  laszip_open_writer(writer, path.c_str(), true);
+  laszip_open_writer(writer, filename.c_str(), true);
 
   for (const auto& pt : cloud->points) {
     point->X = static_cast<laszip_I32>(pt.x * 1000);

@@ -10,13 +10,11 @@ class LidarCompressor {
 public:
   explicit LidarCompressor(const std::string& output_dir);
 
-  void saveAsBin(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud);
-  void saveAsLAZ(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud);
+  void saveAsBin(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud, const std::string &filename);
+  void saveAsLAZ(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud, const std::string &filename);
 
 private:
   std::string output_dir_;
-
-  std::string getTimestampFilename(const std::string& extension);
 };
 
 }  // namespace avs
