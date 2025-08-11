@@ -22,12 +22,11 @@ public:
   : Node("lidar_logger_node", options), logical_written_bytes_(0), cloud_count_(0), fsync_total_ms_(0.0)
   {
     this->get_parameter_or<std::string>("output_dir", output_dir_, "/home/avs/DATA/SSD/lidar_laz");
+    this->get_parameter_or<std::string>("device_name", device_name_, "nvme0n1p3");
     
     this->declare_parameter<std::string>("lidar_topic", "/kitti/velo/pointcloud");
-    this->declare_parameter<std::string>("device_name", "nvme0n1p3");
-
     this->get_parameter("lidar_topic", lidar_topic_);
-    this->get_parameter("device_name", device_name_);
+
 
     compressor_ = std::make_shared<avs::LidarCompressor>(output_dir_); // will create directories inside the compressor creater
 
