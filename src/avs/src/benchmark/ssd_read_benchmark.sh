@@ -67,7 +67,7 @@ drop_caches() {
 ns() { date +%s%N; }
 
 time_cmd() { # prints seconds (floating) to stdout
-  /usr/bin/time -f "%e" -- "$@" 1>/dev/null 2>&1
+  { /usr/bin/time -f "%e" -- "$@" >/dev/null; } 2>&1;
 }
 
 # ---------- Metadata / search ----------
