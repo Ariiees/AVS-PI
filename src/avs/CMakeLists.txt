@@ -11,8 +11,11 @@ find_package(yaml-cpp REQUIRED)
 find_package(PCL REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(Boost REQUIRED COMPONENTS filesystem)
+find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+pkg_check_modules(ROCKSDB REQUIRED rocksdb)
 
 # LASzip
 find_path(LASZIP_INCLUDE_DIR
@@ -23,12 +26,19 @@ find_path(LASZIP_INCLUDE_DIR
 
 find_library(LASZIP_LIBRARY NAMES laszip HINTS /usr/local/lib /usr/lib)
 
+# DB
+# find_path(SQLITE3_INCLUDE_DIRS sqlite3.h)
+# find_library(SQLITE3_LIBRARY sqlite3)
+
+# find_path(ROCKSDB_INCLUDE_DIRS rocksdb/db.h)
+# find_library(ROCKSDB_LIBRARY rocksdb)
 
 include_directories(
   include
   ${OpenCV_INCLUDE_DIRS}
   ${cv_bridge_INCLUDE_DIRS}
   ${SQLITE3_INCLUDE_DIRS}
+  ${ROCKSDB_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
   ${LASZIP_INCLUDE_DIR}
 )
@@ -99,12 +109,32 @@ ament_target_dependencies(fs_lidar_write
    rclcpp sensor_msgs pcl_conversions yaml-cpp
 )  
 
+
+# ========== DB Benchmark ==========
+add_executable(db_benchmark
+  src/benchmark/db_benchmark.cpp
+)
+
+target_include_directories(db_benchmark 
+PRIVATE
+  ${SQLITE3_INCLUDE_DIRS}
+  ${ROCKSDB_INCLUDE_DIRS}
+)
+
+target_link_libraries(db_benchmark
+  ${SQLITE3_LIBRARIES}
+  ${ROCKSDB_LIBRARIES}
+  Threads::Threads
+  dl
+)
+
 # ========== Install Targets ==========
 install(TARGETS
   image_subscriber
   lidar_subscriber
   fs_img_write
   fs_lidar_write
+  db_benchmark
   DESTINATION lib/${PROJECT_NAME}
 )
 
