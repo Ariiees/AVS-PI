@@ -1,6 +1,12 @@
-storage:
-  ssd_dir: /avsData/ssd
-  hdd_dir: /avsData/hdd
+common:
+  img_ssd_dir: /home/avs/DATA/SSD/images
+  lidar_ssd_dir: /home/avs/DATA/SSD/lidar
+  img_hdd_dir: /home/avs/DATA/HDD/images
+  lidar_hdd_dir: /home/avs/DATA/HDD/lidar
+  db_dir:  /home/avs/DATA/DB
+
+  img_topic: /camera/image
+  lidar_topic: /lidar/pointcloud
 
 image_dedup:    # Deduplicate image and save each image to ssd
   hamming_threshold: 2
@@ -13,3 +19,6 @@ image_compress:  # Compress image sequence and save to hdd
 
 lidar_downsample:  # Downsample raw lidar point cloud with voxel grid filter
   leaf_size: 0.2        # 0 to 0.3 recommand
+
+lidar_compress:
+  lidar_format: laz

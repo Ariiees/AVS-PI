@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 project(avs)
 
+cmake_policy(SET CMP0144 NEW)
+
 # Find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -48,6 +50,7 @@ add_executable(image_subscriber
   src/subscriber/image_subscriber.cpp
   src/process/img_dedup.cpp
   src/process/img_compress.cpp
+  src/db_operation/db_operation.cpp
 )
 
 target_link_libraries(image_subscriber
@@ -65,12 +68,14 @@ add_executable(lidar_subscriber
   src/subscriber/lidar_subscriber.cpp
   src/process/lidar_downsample.cpp
   src/process/lidar_compress.cpp
+  src/db_operation/db_operation.cpp
 )
 
 target_link_libraries(lidar_subscriber
   ${PCL_LIBRARIES}
   ${PCL_IO_LIBRARIES}
   ${LASZIP_LIBRARY}
+  ${SQLITE3_LIBRARIES}
   yaml-cpp
 )
 

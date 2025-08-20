@@ -35,18 +35,15 @@ void ImgDeduplicator::loadConfig(const std::string& config_path)
   if (img_format_ == "jpg" || img_format_ == "jpeg")
   {
     write_params_ = {cv::IMWRITE_JPEG_QUALITY, img_quality_};
-    extension_ = ".jpg";
   }
   else if (img_format_ == "png")
   {
     write_params_ = {cv::IMWRITE_PNG_COMPRESSION, img_quality_};
-    extension_ = ".png";
   }
   else
   {
     RCLCPP_WARN(rclcpp::get_logger("img_dedup"), "Unsupported format '%s', defaulting to jpg", img_format_.c_str());
     write_params_ = {cv::IMWRITE_JPEG_QUALITY, 95};
-    extension_ = ".jpg";
   }
 
   std::cout << "[VideoCompressor] Loaded config: image formace = " << img_format_
@@ -95,15 +92,14 @@ int ImgDeduplicator::hammingDistance(const std::bitset<64>& h1, const std::bitse
   return (h1 ^ h2).count();
 }
 
-bool ImgDeduplicator::isUniqueAndStore(const sensor_msgs::msg::Image& img_msg)
+bool ImgDeduplicator::isUniqueAndStore(const sensor_msgs::msg::Image& img_msg, const std::string &filename)
 {
   cv::Mat img = rosImgToCvMat(img_msg);
   auto hash = computePhash(img);
 
   if (first_image_ || hammingDistance(last_hash_, hash) > hamming_threshold_)
   {
-    std::string out_path = avs::getTimestampFilename(output_dir_, extension_);
-    cv::imwrite(out_path, img, write_params_);
+    cv::imwrite(filename, img, write_params_);
     last_hash_ = hash;
     first_image_ = false;
     return true;

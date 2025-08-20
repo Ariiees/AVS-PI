@@ -14,12 +14,11 @@ class ImgDeduplicator
 {
 public:
   ImgDeduplicator(const std::string& output_dir, const std::string& config_path);
-  bool isUniqueAndStore(const sensor_msgs::msg::Image& img_msg);
+  bool isUniqueAndStore(const sensor_msgs::msg::Image& img_msg, const std::string &filename);
 
 private:
   std::string output_dir_;
   std::string img_format_;
-  std::string extension_;
   int img_quality_;
   int hamming_threshold_;
   bool first_image_;

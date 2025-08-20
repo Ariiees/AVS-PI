@@ -31,3 +31,7 @@ sudo ./hdd_tar_bench.sh \
   <!-- If you have multiple tar and want to output to a csv file:
   --csv /home/avs/DATA/HDD/hdd_tar_bench.csv \ -->
 
+
+# Run DB Benchmark
+ros2 run avs db_benchmark 
+(optional)  [--images DIR] [--lidar DIR] [--sqlite FILE] [--rocks DIR]  [--ranges 1000] [--window-ms 1000]
