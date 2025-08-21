@@ -28,12 +28,24 @@ find_path(LASZIP_INCLUDE_DIR
 
 find_library(LASZIP_LIBRARY NAMES laszip HINTS /usr/local/lib /usr/lib)
 
-# DB
-# find_path(SQLITE3_INCLUDE_DIRS sqlite3.h)
-# find_library(SQLITE3_LIBRARY sqlite3)
+# OpenCV (need highgui + imgcodecs for viewing .jpg)
+find_package(OpenCV REQUIRED COMPONENTS highgui imgcodecs)
 
-# find_path(ROCKSDB_INCLUDE_DIRS rocksdb/db.h)
-# find_library(ROCKSDB_LIBRARY rocksdb)
+# PCL (need visualization for point cloud viewer)
+find_package(PCL REQUIRED COMPONENTS common io visualization)
+
+# --- VTK ---
+set(VTK_DIR "/usr/lib/aarch64-linux-gnu/cmake/vtk-9.1")
+
+find_package(VTK REQUIRED COMPONENTS
+  CommonCore
+  CommonDataModel
+  FiltersCore
+  IOLegacy
+  RenderingCore
+  RenderingOpenGL2
+  InteractionStyle
+)
 
 include_directories(
   include
@@ -43,6 +55,7 @@ include_directories(
   ${ROCKSDB_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
   ${LASZIP_INCLUDE_DIR}
+  ${VTK_INCLUDE_DIRS}
 )
 
 # ========== Image Reduction and Save ==========
@@ -50,7 +63,7 @@ add_executable(image_subscriber
   src/subscriber/image_subscriber.cpp
   src/process/img_dedup.cpp
   src/process/img_compress.cpp
-  src/db_operation/db_operation.cpp
+  src/db/db_operation.cpp
 )
 
 target_link_libraries(image_subscriber
@@ -68,7 +81,7 @@ add_executable(lidar_subscriber
   src/subscriber/lidar_subscriber.cpp
   src/process/lidar_downsample.cpp
   src/process/lidar_compress.cpp
-  src/db_operation/db_operation.cpp
+  src/db/db_operation.cpp
 )
 
 target_link_libraries(lidar_subscriber
@@ -133,6 +146,25 @@ target_link_libraries(db_benchmark
   dl
 )
 
+# ========== Retrieve Visualization CLI ==========
+add_executable(retrieve_cli
+  src/retrieve/retrieve_cli.cpp
+  src/retrieve/retrieve_api.cpp
+  src/db/db_operation.cpp
+)
+
+target_link_libraries(retrieve_cli
+  ${OpenCV_LIBS}
+  ${PCL_LIBRARIES}
+  ${PCL_IO_LIBRARIES}
+  ${LASZIP_LIBRARY}
+  ${SQLITE3_LIBRARIES}
+  ${VTK_LIBRARIES}
+)
+
+# PCL needs these sometimes
+add_definitions(${PCL_DEFINITIONS})
+
 # ========== Install Targets ==========
 install(TARGETS
   image_subscriber
@@ -140,6 +172,7 @@ install(TARGETS
   fs_img_write
   fs_lidar_write
   db_benchmark
+  retrieve_cli
   DESTINATION lib/${PROJECT_NAME}
 )
 
