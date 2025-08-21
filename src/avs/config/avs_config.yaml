@@ -10,7 +10,7 @@ common:
 
 image_dedup:    # Deduplicate image and save each image to ssd
   hamming_threshold: 2
-  img_format: "jpg"     # "jpg" or "png"
+  img_format: jpg     # "jpg" or "png"
   img_quality: 95       # 0–100 for jpg, 0–9 for png
 
 image_compress:  # Compress image sequence and save to hdd

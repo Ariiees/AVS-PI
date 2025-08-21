@@ -18,6 +18,7 @@ find_package(Threads REQUIRED)
 
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 pkg_check_modules(ROCKSDB REQUIRED rocksdb)
+pkg_check_modules(LIBARCHIVE REQUIRED libarchive)
 
 # LASzip
 find_path(LASZIP_INCLUDE_DIR
@@ -56,6 +57,7 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
   ${LASZIP_INCLUDE_DIR}
   ${VTK_INCLUDE_DIRS}
+  ${LIBARCHIVE_INCLUDE_DIRS}
 )
 
 # ========== Image Reduction and Save ==========
@@ -165,6 +167,18 @@ target_link_libraries(retrieve_cli
 # PCL needs these sometimes
 add_definitions(${PCL_DEFINITIONS})
 
+# ========== Archive Move Manager ==========
+add_executable(archive_move
+  src/archive/move_manager.cpp
+  src/db/db_operation.cpp
+)
+
+target_link_libraries(archive_move
+  ${LIBARCHIVE_LIBRARIES}
+  ${SQLITE3_LIBRARIES}
+  yaml-cpp
+)
+
 # ========== Install Targets ==========
 install(TARGETS
   image_subscriber
@@ -173,6 +187,7 @@ install(TARGETS
   fs_lidar_write
   db_benchmark
   retrieve_cli
+  archive_move
   DESTINATION lib/${PROJECT_NAME}
 )
 

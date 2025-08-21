@@ -35,8 +35,10 @@ public:
     db_dir_ = common["db_dir"].as<std::string>();
     lidar_ext_ = dedup["lidar_format"].as<std::string>();
 
+    lidar_path_ = (fs::path(lidar_ssd_dir_) / avs::getCurrentDayFolder()).string();
+
     downsampler_ = std::make_shared<LidarDownsampler>(config_path);
-    compressor_ = std::make_shared<LidarCompressor>(lidar_ssd_dir_);
+    compressor_ = std::make_shared<LidarCompressor>(lidar_path_);
 
     fs::create_directories(db_dir_);
     const std::string db_path = (fs::path(db_dir_) / "avs_lidar.sqlite3").string();
@@ -50,7 +52,7 @@ public:
     
     RCLCPP_INFO(this->get_logger(),
                 "AVS Lidar node started. Subscribed to %s; saving to %s; DB at %s",
-                lidar_topic_.c_str(), lidar_ssd_dir_.c_str(), db_path.c_str());
+                lidar_topic_.c_str(), lidar_path_.c_str(), db_path.c_str());
   }
 
 private:
@@ -62,7 +64,7 @@ private:
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr downsampled = downsampler_->downsample(pcl_cloud);
 
-    auto [filepath, ts_ms] = avs::getTimestampAndFilename(this->lidar_ssd_dir_, lidar_ext_);
+    auto [filepath, ts_ms] = avs::getTimestampAndFilename(this->lidar_path_, lidar_ext_);
 
     try {
       compressor_->saveAsLAZ(downsampled, filepath);
@@ -98,6 +100,8 @@ private:
   std::string lidar_ssd_dir_;
   std::string db_dir_;
   std::string lidar_ext_;
+
+  std::string lidar_path_;
 
   std::shared_ptr<LidarDownsampler> downsampler_;
   std::shared_ptr<LidarCompressor> compressor_;

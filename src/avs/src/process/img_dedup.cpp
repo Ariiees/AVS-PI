@@ -32,7 +32,7 @@ void ImgDeduplicator::loadConfig(const std::string& config_path)
   img_format_ = config["img_format"] ? config["img_format"].as<std::string>() : "jpg";
   img_quality_ = config["img_quality"] ? config["img_quality"].as<int>() : 95;
 
-  if (img_format_ == "jpg" || img_format_ == "jpeg")
+  if (img_format_ == "jpg")
   {
     write_params_ = {cv::IMWRITE_JPEG_QUALITY, img_quality_};
   }

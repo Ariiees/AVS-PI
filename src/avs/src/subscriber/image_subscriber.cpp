@@ -35,7 +35,9 @@ public:
     db_dir_ = common["db_dir"].as<std::string>();
     image_ext_ = dedup["img_format"].as<std::string>();
 
-    deduplicator_ = std::make_shared<ImgDeduplicator>(image_ssd_dir_, config_path);
+    image_path_ = (fs::path(image_ssd_dir_) / avs::getCurrentDayFolder()).string();
+
+    deduplicator_ = std::make_shared<ImgDeduplicator>(image_path_, config_path);
 
     fs::create_directories(db_dir_);
     const std::string db_path = (fs::path(db_dir_) / "avs_image.sqlite3").string();
@@ -49,7 +51,7 @@ public:
 
     RCLCPP_INFO(this->get_logger(),
                 "AVS Image node started. Subscribed to %s; saving to %s; DB at %s",
-                image_topic_.c_str(), image_ssd_dir_.c_str(), db_path.c_str());
+                image_topic_.c_str(), image_path_.c_str(), db_path.c_str());
   }
 
 private:
@@ -58,7 +60,7 @@ private:
     const auto t0 = std::chrono::steady_clock::now();
 
     // Build filename from wall-clock ms so the on-disk name is friendly/stable.
-    auto [filepath, ts_ms] = avs::getTimestampAndFilename(image_ssd_dir_, image_ext_);
+    auto [filepath, ts_ms] = avs::getTimestampAndFilename(image_path_, image_ext_);
 
     bool is_unique = false;
     try {
@@ -106,6 +108,7 @@ private:
   std::string image_ssd_dir_;
   std::string db_dir_;
   std::string image_ext_;
+  std::string image_path_;
 
   // Helpers
   std::shared_ptr<ImgDeduplicator> deduplicator_;

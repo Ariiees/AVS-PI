@@ -27,6 +27,28 @@ inline std::pair<std::string, long long> getTimestampAndFilename(
   return {full_path, ms};
 }
 
+// Return today's folder name in "YYYY-MM-DD" format (local time)
+inline std::string getCurrentDayFolder()
+{
+  using namespace std::chrono;
+  const auto now = system_clock::now();
+  const std::time_t tt = system_clock::to_time_t(now);
+
+  std::tm tm{};
+#if defined(_WIN32)
+  localtime_s(&tm, &tt);
+#else
+  localtime_r(&tt, &tm);
+#endif
+
+  std::ostringstream oss;
+  oss << std::setfill('0')
+      << std::setw(4) << (tm.tm_year + 1900) << "-"
+      << std::setw(2) << (tm.tm_mon + 1)     << "-"
+      << std::setw(2) << tm.tm_mday;
+  return oss.str();
+}
+
 // Parse a wall-clock RANGE in strict format "YYYY-M-D_HH-MM" (seconds = 00)
 // into epoch milliseconds (local time). Returns true on success.
 // On failure, if 'err' is provided, it will contain a short reason.
