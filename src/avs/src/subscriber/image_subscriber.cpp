@@ -1,5 +1,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "std_msgs/msg/int64.hpp"
 #include "avs/img_dedup.h"
 #include "avs/img_compress.h"
 #include "avs/db_operation.h"
@@ -17,11 +18,11 @@ namespace fs = std::filesystem;
 namespace avs
 {
 
-class ImgDedupNode : public rclcpp::Node
+class ImgProcessNode : public rclcpp::Node
 {
 public:
-  ImgDedupNode()
-  : Node("img_dedup_node")
+  ImgProcessNode()
+  : Node("img_process_node")
   {
     this->declare_parameter<std::string>("config_path", "/home/avs/AVS-PI/src/avs/config/avs_config.yaml");
      std::string config_path = this->get_parameter("config_path").as_string();
@@ -47,7 +48,9 @@ public:
     }
 
     subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
-      image_topic_, 10, std::bind(&ImgDedupNode::imageCallback, this, _1));
+      image_topic_, 10, std::bind(&ImgProcessNode::imageCallback, this, _1));
+    
+    latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
 
     RCLCPP_INFO(this->get_logger(),
                 "AVS Image node started. Subscribed to %s; saving to %s; DB at %s",
@@ -82,16 +85,16 @@ private:
       std::string err;
       if (!db_.insertRow(row, &err)) {
         RCLCPP_ERROR(this->get_logger(), "DB insert failed: %s", err.c_str());
-      } else {
-        RCLCPP_DEBUG(this->get_logger(), "DB insert OK: %s", filepath.c_str());
-      }
+      } 
+      
+      const auto t1 = std::chrono::steady_clock::now();
+      const auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+      std_msgs::msg::Int64 m;
+      m.data = latency_us;
+      latency_pub_->publish(m);
     }
 
-    const auto t1 = std::chrono::steady_clock::now();
-    const auto latency_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-
-    RCLCPP_INFO(this->get_logger(), "Latency: %ld µs", latency_us);
+    // RCLCPP_INFO(this->get_logger(), "Latency: %ld µs", latency_us);
     // if (is_unique) {
     //   RCLCPP_INFO(this->get_logger(),
     //               "[UNIQUE] saved %s | latency=%ldus",
@@ -116,6 +119,7 @@ private:
 
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_;
+  rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr latency_pub_;
 };
 
 } // namespace avs
@@ -123,7 +127,7 @@ private:
 int main(int argc, char * argv[])
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<avs::ImgDedupNode>());
+  rclcpp::spin(std::make_shared<avs::ImgProcessNode>());
   rclcpp::shutdown();
   return 0;
 }

@@ -1,5 +1,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "std_msgs/msg/int64.hpp"
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_types.h>
 #include "avs/lidar_downsample.h"
@@ -50,6 +51,8 @@ public:
     subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       lidar_topic_, rclcpp::SensorDataQoS(), std::bind(&LidarProcessNode::lidarCallback, this, _1));
     
+    latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
+    
     RCLCPP_INFO(this->get_logger(),
                 "AVS Lidar node started. Subscribed to %s; saving to %s; DB at %s",
                 lidar_topic_.c_str(), lidar_path_.c_str(), db_path.c_str());
@@ -90,7 +93,10 @@ private:
     auto t1 = std::chrono::steady_clock::now();
     auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
-    RCLCPP_INFO(this->get_logger(), "Latency: %ld µs", latency_us);
+    std_msgs::msg::Int64 m;
+    m.data = latency_us;
+    latency_pub_->publish(m);
+    // RCLCPP_INFO(this->get_logger(), "Latency: %ld µs", latency_us);
   }
 
 
@@ -108,6 +114,7 @@ private:
   AvsDb db_;
 
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
+  rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr latency_pub_;
 };
 
 } // namespace avs
