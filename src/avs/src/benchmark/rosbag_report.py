@@ -28,7 +28,7 @@ from rosbag2_py import StorageOptions, ConverterOptions, TopicMetadata
 # -------------------- constants / defaults --------------------
 BAG_ROOT = Path("/home/avs/DATA/ros2bag")
 IMAGE_TOPIC = "/camera/image"
-LIDAR_TOPIC = "/lidar/points"
+LIDAR_TOPIC = "/lidar/pointcloud"
 
 # patterns to detect our own child writer
 IMAGE_PATTERNS = ["--writer-child", "rosbag_writer_child", "sensor_msgs/msg/Image"]
