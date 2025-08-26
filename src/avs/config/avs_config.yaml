@@ -1,12 +1,15 @@
 common:
   img_ssd_dir: /home/avs/DATA/SSD/images
   lidar_ssd_dir: /home/avs/DATA/SSD/lidar
+  gps_ssd_dir: /home/avs/DATA/SSD/gps
   img_hdd_dir: /home/avs/DATA/HDD/images
   lidar_hdd_dir: /home/avs/DATA/HDD/lidar
-  db_dir:  /home/avs/DATA/DB
+  gps_hdd_dir: /home/avs/DATA/HDD/gps
+  db_dir:  /home/avs/DATA/SSD/DB
 
-  img_topic: /camera/image
-  lidar_topic: /lidar/pointcloud
+  img_topic: /my_camera/pylon_ros2_camera_node/image_raw  #/camera/image for KITTI
+  lidar_topic:  /sensing/lidar/top/pointcloud      #/lidar/pointcloud for KITTI
+  gps_topic: /novatel/oem7/gps
 
 image_dedup:    # Deduplicate image and save each image to ssd
   hamming_threshold: 2

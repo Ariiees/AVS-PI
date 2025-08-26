@@ -18,17 +18,27 @@ from rclpy.executors import SingleThreadedExecutor, ExternalShutdownException
 from std_msgs.msg import Int64
 
 # --------- Identify processes and launch commands per mode ----------
-IMAGE_PATTERNS = ["img_dedup_node", "image_subscriber", "image_subscribe"]
+IMAGE_PATTERNS = ["image_subscriber", "img_dedup_node", "image_subscribe"]
 LIDAR_PATTERNS = ["lidar_subscriber", "lidar_dedup_node", "lidar_process"]
+GPS_PATTERNS   = ["gps_subscriber"]
+
+# Prefer exact executable names for the real node binaries
+EXEC_NAMES = {
+    "image": ["image_subscriber", "img_dedup_node", "image_subscribe"],
+    "lidar": ["lidar_subscriber", "lidar_dedup_node", "lidar_process"],
+    "gps":   ["gps_subscriber"],
+}
 
 LAUNCH_CMDS = {
     "image": "ros2 run avs image_subscriber",
     "lidar": "ros2 run avs lidar_subscriber",
+    "gps":   "ros2 run avs gps_subscriber",
 }
 
 # Root data directories (adjust if your paths differ)
-IMG_ROOT = Path("/home/avs/DATA/SSD/images")
+IMG_ROOT   = Path("/home/avs/DATA/SSD/images")
 LIDAR_ROOT = Path("/home/avs/DATA/SSD/lidar")
+GPS_ROOT   = Path("/home/avs/DATA/SSD/gps")  # gps_subscriber writes <YYYY-MM-DD>.sqlite here
 
 # Latency topics published by your AVS nodes
 AVS_LAT_TOPIC = "/avs/record_latency_us"
@@ -46,11 +56,6 @@ def find_processes_by_cmd_contains(substrs):
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return matches
-
-def pick_heaviest(procs):
-    if not procs:
-        return None
-    return max(procs, key=lambda x: (x.is_running() and x.memory_info().rss) or 0)
 
 def du_bytes(path: Path) -> int:
     """Disk usage (bytes) for file or recursively for a directory."""
@@ -87,6 +92,118 @@ def percentiles(xs, ps):
         out[p] = s[k]
     return out
 
+def list_children_recursive(pid):
+    try:
+        parent = psutil.Process(pid)
+        return parent.children(recursive=True)
+    except psutil.Error:
+        return []
+
+def prefer_real_node_processes(candidates, prefer_names):
+    """Pick processes whose name/cmdline matches actual node executables."""
+    real = []
+    for p in candidates:
+        try:
+            name = (p.name() or "")
+            cmd  = " ".join(p.cmdline() or [])
+            if any(name == n for n in prefer_names):
+                real.append(p); continue
+            if any((" " + n + " ") in (" " + cmd + " ") for n in prefer_names):
+                real.append(p); continue
+        except psutil.Error:
+            continue
+    return real
+
+def exclude_wrappers(candidates):
+    """Drop obvious wrapper/launcher processes like ros2/python/sh."""
+    out = []
+    for p in candidates:
+        try:
+            name = (p.name() or "").lower()
+            cmd  = " ".join(p.cmdline() or "").lower()
+            if (" ros2 " in cmd) or ("python" in name) or name in ("bash","sh"):
+                continue
+            out.append(p)
+        except psutil.Error:
+            continue
+    return out
+
+def resolve_target_processes(mode, launched, spawned_proc, patterns):
+    prefer_names = EXEC_NAMES[mode]
+    targets = []
+
+    if launched and spawned_proc is not None:
+        # Give the child process a moment to spawn
+        for _ in range(20):  # up to ~2s
+            kids = list_children_recursive(spawned_proc.pid)
+            # Best: exact executable(s)
+            real = prefer_real_node_processes(kids, prefer_names)
+            if real:
+                targets = real
+                break
+            # Next: any non-wrapper child
+            nonwrap = exclude_wrappers(kids)
+            if nonwrap:
+                targets = nonwrap
+                break
+            time.sleep(0.1)
+
+        if not targets:
+            # Fallback: measure the launcher itself (worst case)
+            try:
+                targets = [psutil.Process(spawned_proc.pid)]
+            except psutil.Error:
+                targets = []
+    else:
+        # Already running: scan whole system
+        prelim = []
+        for p in psutil.process_iter(attrs=['pid','cmdline','name']):
+            try:
+                cmd  = ' '.join(p.info.get('cmdline') or "")
+                name = p.info.get('name') or ""
+                if any(s in cmd for s in patterns) or any(name == n for n in prefer_names):
+                    prelim.append(p)
+            except psutil.Error:
+                continue
+
+        # Prefer exact executables, otherwise drop wrappers, otherwise keep prelim
+        exact = prefer_real_node_processes(prelim, prefer_names)
+        if exact:
+            targets = exact
+        else:
+            nonwrap = exclude_wrappers(prelim)
+            targets = nonwrap if nonwrap else prelim
+
+    # Deduplicate by PID and drop zombies
+    uniq = {}
+    for p in targets:
+        try:
+            if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                uniq[p.pid] = p
+        except psutil.Error:
+            continue
+    return list(uniq.values())
+
+def prime_cpu_counters(procs):
+    for p in procs:
+        try:
+            p.cpu_percent(None)
+        except psutil.Error:
+            pass
+
+def sample_group_cpu_rss(procs):
+    cpu = 0.0
+    rss = 0
+    alive = []
+    for p in procs:
+        try:
+            cpu += p.cpu_percent(None)
+            rss += p.memory_info().rss
+            alive.append(p)
+        except psutil.Error:
+            continue
+    return cpu, round(rss / (1024*1024), 2), alive
+
 
 # ---------------- ROS Latency Collector (single-threaded) ---------------
 class AvsLatencyCollector(Node):
@@ -104,18 +221,26 @@ def main():
     parser = argparse.ArgumentParser(
         description="Ensure AVS subscriber is running, run benchmark for a fixed duration, then report and clean up if we launched it."
     )
-    parser.add_argument("--mode", choices=["image", "lidar"], required=True,
+    parser.add_argument("--mode", choices=["image", "lidar", "gps"], required=True,
                         help="Which AVS subscriber to check/launch")
     parser.add_argument("--duration-sec", type=int, required=True,
                         help="Benchmark duration in seconds (fixed timer)")
     args = parser.parse_args()
 
     # Mode setup
-    patterns = IMAGE_PATTERNS if args.mode == "image" else LIDAR_PATTERNS
+    today = datetime.now().strftime("%Y-%m-%d")
+    if args.mode == "image":
+        patterns = IMAGE_PATTERNS
+        data_dir = (IMG_ROOT / today)
+    elif args.mode == "lidar":
+        patterns = LIDAR_PATTERNS
+        data_dir = (LIDAR_ROOT / today)
+    else:  # gps
+        patterns = GPS_PATTERNS
+        data_dir = GPS_ROOT
+
     launch_cmd = LAUNCH_CMDS[args.mode]
     avs_lat_topic = AVS_LAT_TOPIC
-    today = datetime.now().strftime("%Y-%m-%d")
-    data_dir = (IMG_ROOT if args.mode == "image" else LIDAR_ROOT) / today
 
     # 1) Ensure AVS subscriber is running (auto-launch if not)
     procs = find_processes_by_cmd_contains(patterns)
@@ -128,7 +253,6 @@ def main():
         print(f"[INFO] AVS {args.mode} subscriber not found. Launching:")
         print(f"{launch_cmd}")
         try:
-            # new session/process group so we can clean it (and its children) later
             spawned_proc = subprocess.Popen(launch_cmd, shell=True, preexec_fn=os.setsid)
             spawned_pgid = os.getpgid(spawned_proc.pid)
         except Exception as e:
@@ -138,7 +262,6 @@ def main():
         time.sleep(2.0)
         procs = find_processes_by_cmd_contains(patterns)
         if not procs:
-            # best-effort cleanup of just-started PG on failure
             try:
                 if spawned_proc and spawned_proc.poll() is None:
                     os.killpg(spawned_pgid, signal.SIGTERM)
@@ -151,41 +274,49 @@ def main():
     else:
         print(f"[OK] AVS {args.mode} subscriber already running.")
 
+    # 2) Resolve the *real* node processes to measure (not the ros2/python wrapper)
+    target_procs = resolve_target_processes(args.mode, launched, spawned_proc, patterns)
+    if not target_procs:
+        print("[ERROR] Could not identify target process(es) to measure.")
+        sys.exit(3)
 
-    proc = pick_heaviest(procs)
+    # Build a display string for PIDs & command(s)
     try:
-        cmdline = " ".join(proc.cmdline())
-    except psutil.Error:
-        cmdline = "<unavailable>"
+        cmdlines = []
+        for p in target_procs:
+            try:
+                cmdlines.append(f"{p.pid}:{' '.join(p.cmdline() or [])}")
+            except psutil.Error:
+                cmdlines.append(f"{p.pid}:<unavailable>")
+        cmdline_display = " | ".join(cmdlines)
+    except Exception:
+        cmdline_display = "<unavailable>"
 
-    # 2) Capture initial metrics
+    # 3) Capture initial metrics
     start_time = time.time()
     end_time = start_time + max(1, int(args.duration_sec))
-    data_dir.mkdir(parents=True, exist_ok=True)  # avoid scanning a missing tree
+    data_dir.mkdir(parents=True, exist_ok=True)  # ensure path exists for du
     start_size_bytes = du_bytes(data_dir)
 
-    # Prime CPU measurement
-    try:
-        proc.cpu_percent(None)
-    except psutil.Error:
-        pass
+    # Prime CPU counters for all targets
+    prime_cpu_counters(target_procs)
 
     cpu_samples = []
     rss_samples = []
 
-    # 3) ROS init (default global context) & latency collector
+    # 4) ROS init & latency collector
     rclpy.init()
     lat_node = AvsLatencyCollector(avs_lat_topic)
     exec_ = SingleThreadedExecutor()
     exec_.add_node(lat_node)
 
     print(f"[INFO] Latency collector subscribed to {avs_lat_topic}")
+    print(f"[INFO] Measuring PIDs: {[p.pid for p in target_procs]}")
     print(f"[INFO] Beginning benchmark for {args.duration_sec} seconds...")
 
-    # 4) Run until the timer hits
+    # 5) Run until the timer hits
     try:
         while time.time() < end_time:
-            # Spin ROS briefly to collect latencies
             if rclpy.ok():
                 try:
                     exec_.spin_once(timeout_sec=0.05)
@@ -194,16 +325,12 @@ def main():
 
             # Sample CPU/RSS roughly once per second
             if not cpu_samples or (time.time() - start_time) >= len(cpu_samples) + 1:
-                try:
-                    cpu = proc.cpu_percent(None)
-                    rss_mb = round(proc.memory_info().rss / (1024 * 1024), 2)
-                except psutil.Error:
-                    cpu = 0.0
-                    rss_mb = 0.0
-                cpu_samples.append(cpu)
-                rss_samples.append(rss_mb)
+                cpu, rss_mb, alive = sample_group_cpu_rss(target_procs)
+                target_procs = alive  # drop any that died
+                cpu_samples.append(round(cpu, 2))
+                rss_samples.append(round(rss_mb, 2))
 
-            time.sleep(0.05)  # gentle loop
+            time.sleep(0.05)
     finally:
         # Clean up ROS
         print("[INFO] Benchmark finished, shutting down ROS...")
@@ -219,9 +346,8 @@ def main():
         except Exception:
             pass
 
-    # 5) If we launched the subscriber, clean it up (and related PIDs)
+    # 6) If we launched the subscriber, clean it up (and related PIDs)
     if launched and spawned_proc:
-        # Prefer graceful shutdown first, then force
         print("[INFO] Cleaning up launched AVS subscriber...")
         try:
             if spawned_proc.poll() is None and spawned_pgid is not None:
@@ -235,8 +361,6 @@ def main():
                 time.sleep(0.5)
         except Exception:
             pass
-        # Best-effort extra cleanup: kill any lingering processes matching patterns,
-        # but only those started after we launched (avoid killing user's pre-existing ones).
         try:
             for p in find_processes_by_cmd_contains(patterns):
                 try:
@@ -247,7 +371,7 @@ def main():
         except Exception:
             pass
 
-    # 6) Final metrics & report
+    # 7) Final metrics & report
     duration = round(time.time() - start_time, 2)
     final_size_bytes = du_bytes(data_dir)
     size_delta_mb = human_mb(max(0, final_size_bytes - start_size_bytes))
@@ -264,12 +388,12 @@ def main():
     print("\n========== AVS Benchmark Report ==========")
     print(f"Mode:                  {args.mode}")
     print(f"Status:                {'launched now' if launched else 'already running'}")
-    print(f"PID:                   {proc.pid}")
-    print(f"Command:               {cmdline}")
+    print(f"PIDs measured:         {[p.pid for p in target_procs]}")
+    print(f"Commands:              {cmdline_display}")
     print(f"Data dir:              {data_dir}")
     print(f"Run duration:          {duration} s  (timer target: {args.duration_sec} s)")
     print("------------------------------------------")
-    print("CPU% / Memory (RSS MB):")
+    print("CPU% (aggregate) / Memory (RSS MB, aggregate):")
     print(f"  AVS:      avg {cpu_avg}% (max {cpu_max}%), "
           f"RSS avg {rss_avg} MB (max {rss_max} MB)")
     print("------------------------------------------")

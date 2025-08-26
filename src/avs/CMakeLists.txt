@@ -15,6 +15,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(Boost REQUIRED COMPONENTS filesystem)
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
+find_package(gps_msgs REQUIRED)  
 
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 pkg_check_modules(ROCKSDB REQUIRED rocksdb)
@@ -97,6 +98,22 @@ target_link_libraries(lidar_subscriber
 ament_target_dependencies(lidar_subscriber
   rclcpp sensor_msgs pcl_conversions yaml-cpp
 )
+
+# ========== GPS Subscriber ==========
+
+add_executable(gps_subscriber 
+  src/subscriber/gps_subscriber.cpp
+)
+
+target_link_libraries(gps_subscriber 
+   ${SQLITE3_LIBRARIES}
+   yaml-cpp
+)
+
+ament_target_dependencies(gps_subscriber 
+  rclcpp gps_msgs yaml-cpp
+) 
+
 
 # ========== File System Benchmark Image Write ==========
 add_executable(fs_img_write
@@ -183,6 +200,7 @@ target_link_libraries(archive_move
 install(TARGETS
   image_subscriber
   lidar_subscriber
+  gps_subscriber
   fs_img_write
   fs_lidar_write
   db_benchmark

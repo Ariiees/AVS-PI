@@ -47,8 +47,11 @@ public:
       throw std::runtime_error("Failed to open DB: " + err);
     }
 
+    // subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
+    //   image_topic_, 10, std::bind(&ImgProcessNode::imageCallback, this, _1));
     subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
-      image_topic_, 10, std::bind(&ImgProcessNode::imageCallback, this, _1));
+      image_topic_, make_auto_qos(image_topic_),
+      std::bind(&ImgProcessNode::imageCallback, this, _1));
     
     latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
 
@@ -58,6 +61,7 @@ public:
   }
 
 private:
+
   void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
   {
     const auto t0 = std::chrono::steady_clock::now();
@@ -104,6 +108,41 @@ private:
     //               latency_us);
     // }
   }
+
+  rclcpp::QoS make_auto_qos(const std::string& topic)
+  {
+    using rclcpp::ReliabilityPolicy;
+
+    // Fallback: KEEP_LAST(10), RELIABLE, VOLATILE
+    rclcpp::QoS qos(10);
+    qos.reliability(ReliabilityPolicy::Reliable);
+    qos.durability(rclcpp::DurabilityPolicy::Volatile);
+
+    for (int i = 0; i < 20; ++i) {
+      auto infos = this->get_publishers_info_by_topic(topic);
+      if (!infos.empty()) {
+        auto offered = infos.front().qos_profile();
+
+        qos.reliability(offered.reliability());
+
+        RCLCPP_INFO(
+          this->get_logger(),
+          "QoS for %s -> depth=10 reliability=%d durability=%d",
+          topic.c_str(),
+          static_cast<int>(qos.get_rmw_qos_profile().reliability),
+          static_cast<int>(qos.get_rmw_qos_profile().durability));
+
+        return qos;
+      }
+      rclcpp::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    RCLCPP_WARN(this->get_logger(),
+                "No publisher QoS detected on %s; using fallback QoS(KEEP_LAST depth=10, RELIABLE, VOLATILE)",
+                topic.c_str());
+    return qos;
+  }
+
 
 private:
   // Config/state

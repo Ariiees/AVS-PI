@@ -35,3 +35,19 @@ sudo ./hdd_tar_bench.sh \
 # Run DB Benchmark
 ros2 run avs db_benchmark 
 (optional)  [--images DIR] [--lidar DIR] [--sqlite FILE] [--rocks DIR]  [--ranges 1000] [--window-ms 1000]
+
+
+# Run Prototype Benchmark
+Benchmark Image:
+```
+./avs_report.py --mode image --duration-sec 240
+./rosbag_report.py --mode image --duration-secs 240
+./rosbag_compress_report.py --topics /my_camera/pylon_ros2_camera_node/image_raw --duration-sec 240 --compression-mode message --compression-format zstd
+```
+
+Benchmark Lidar:
+```
+./avs_report.py --mode lidar --duration-sec 240
+./rosbag_report.py --mode lidar --duration-secs 240
+./rosbag_compress_report.py --topics /sensing/lidar/top/pointcloud --duration-sec 240 --compression-mode message --compression-format zstd
+```

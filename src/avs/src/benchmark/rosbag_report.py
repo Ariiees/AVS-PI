@@ -16,7 +16,7 @@ import psutil
 # ROS 2 (Jazzy-friendly)
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.serialization import serialize_message
 from rclpy.executors import SingleThreadedExecutor, ExternalShutdownException
 from std_msgs.msg import Int64
@@ -25,14 +25,26 @@ from std_msgs.msg import Int64
 import rosbag2_py
 from rosbag2_py import StorageOptions, ConverterOptions, TopicMetadata
 
+
 # -------------------- constants / defaults --------------------
 BAG_ROOT = Path("/home/avs/DATA/ros2bag")
-IMAGE_TOPIC = "/camera/image"
-LIDAR_TOPIC = "/lidar/pointcloud"
 
-# patterns to detect our own child writer
+IMAGE_TOPIC = "/my_camera/pylon_ros2_camera_node/image_raw"
+LIDAR_TOPIC = "/sensing/lidar/top/pointcloud"
+GPS_TOPIC   = "/novatel/oem7/gps"  # gps_msgs/msg/GPSFix
+
 IMAGE_PATTERNS = ["--writer-child", "rosbag_writer_child", "sensor_msgs/msg/Image"]
 LIDAR_PATTERNS = ["--writer-child", "rosbag_writer_child", "sensor_msgs/msg/PointCloud2"]
+GPS_PATTERNS   = ["--writer-child", "rosbag_writer_child", "gps_msgs/msg/GPSFix"]
+
+
+def get_patterns(mode: str):
+    if mode == "image":
+        return IMAGE_PATTERNS
+    if mode == "lidar":
+        return LIDAR_PATTERNS
+    return GPS_PATTERNS  # gps
+
 
 # ----------------------- helpers -----------------------
 def find_processes_by_cmd_contains(substrs):
@@ -86,17 +98,15 @@ def percentiles(xs, ps):
     return out
 
 def parse_external_outdir_from_cmdline(cmd: str) -> Path | None:
-    """Extract output dir from another writer's cmdline."""
     m = re.search(r"--writer-out\s+(\S+)", cmd)
     if m:
         return Path(m.group(1))
-    m = re.search(r"(?:^|\s)-o\s+(\S+)", cmd)  # ros2 bag record -o
+    m = re.search(r"(?:^|\s)-o\s+(\S+)", cmd)
     if m:
         return Path(m.group(1))
     return None
 
 def fresh_uri(base: Path) -> Path:
-    """Return a non-existing path by appending a numeric suffix if needed."""
     if not base.exists():
         return base
     for i in range(1, 1000):
@@ -116,11 +126,15 @@ class RosbagLatencyCollector(Node):
         self.latencies.append(int(msg.data))
 
 
-# ---------------------- child writer entry ----------------------
-def writer_child(mode: str, topic: str, out_dir: str, lat_topic: str):
+# ---------------------- child writer entry (Python only) ----------------------
+def writer_child(mode: str,
+                 topic: str,
+                 out_dir: str,
+                 lat_topic: str,
+                 storage_id: str):
     """
     Subscribes to `topic`, writes with rosbag2_py.SequentialWriter to `out_dir`,
-    and publishes per-message write latency on a UNIQUE topic `lat_topic`.
+    and publishes per-message write latency on UNIQUE topic `lat_topic`.
     """
     def _child_sig(_s, _f):
         if rclpy.ok():
@@ -130,12 +144,16 @@ def writer_child(mode: str, topic: str, out_dir: str, lat_topic: str):
 
     rclpy.init()
 
+    # Select ROS type by mode
     if mode == "image":
         from sensor_msgs.msg import Image as MsgType
         ros_type = "sensor_msgs/msg/Image"
-    else:
+    elif mode == "lidar":
         from sensor_msgs.msg import PointCloud2 as MsgType
         ros_type = "sensor_msgs/msg/PointCloud2"
+    else:  # gps
+        from gps_msgs.msg import GPSFix as MsgType
+        ros_type = "gps_msgs/msg/GPSFix"
 
     class WriterNode(Node):
         def __init__(self, topic_name: str, out_dir: str, ros_type: str, lat_topic: str):
@@ -144,29 +162,33 @@ def writer_child(mode: str, topic: str, out_dir: str, lat_topic: str):
             self.ros_type = ros_type
             self.lat_pub = self.create_publisher(Int64, lat_topic, 10)
 
-            # QoS mirror if possible, else sensor profile
-            qos = None
+            # QoS mirror if possible
+            qos = QoSProfile(depth=10)
+            qos.reliability = ReliabilityPolicy.RELIABLE
+            qos.durability = DurabilityPolicy.VOLATILE
             try:
                 infos = self.get_publishers_info_by_topic(topic_name)
                 if infos:
                     offered = infos[0].qos_profile
-                    qos = QoSProfile(depth=max(200, getattr(offered, "depth", 10)))
-                    qos.history = offered.history
                     qos.reliability = offered.reliability
                     qos.durability = offered.durability
-            except Exception:
-                qos = None
-            if qos is None:
-                qos = qos_profile_sensor_data
-                qos.depth = 400 if mode == "lidar" else 200
+                    self.get_logger().info(
+                        f"QoS for {topic_name} -> depth={qos.depth} "
+                        f"reliability={int(qos.reliability)} durability={int(qos.durability)}"
+                    )
+                else:
+                    self.get_logger().warn(
+                        f"No publishers discovered on {topic_name}; using KEEP_LAST(10), RELIABLE, VOLATILE"
+                    )
+            except Exception as e:
+                self.get_logger().warn(f"Failed to inspect publisher QoS on {topic_name}: {e}")
 
-            # Ensure we don't collide with an existing bag dir
             uri = fresh_uri(Path(out_dir))
-
             self.writer = rosbag2_py.SequentialWriter()
-            storage_opts = StorageOptions(uri=str(uri), storage_id='sqlite3')
+            storage_opts = StorageOptions(uri=str(uri), storage_id=storage_id)
             converter_opts = ConverterOptions(input_serialization_format='cdr',
                                               output_serialization_format='cdr')
+
             self.writer.open(storage_opts, converter_opts)
 
             meta = TopicMetadata(
@@ -178,7 +200,10 @@ def writer_child(mode: str, topic: str, out_dir: str, lat_topic: str):
             self.writer.create_topic(meta)
 
             self.sub = self.create_subscription(MsgType, self.topic, self.cb, qos)
-            self.get_logger().info(f"Writer ready. Topic: {self.topic}, Out: {uri}, LatTopic: {lat_topic}")
+            self.get_logger().info(
+                f"Writer ready. Topic: {self.topic}, Out: {uri}, LatTopic: {lat_topic}, "
+                f"Storage: {storage_id}"
+            )
 
         def cb(self, msg):
             try:
@@ -187,7 +212,8 @@ def writer_child(mode: str, topic: str, out_dir: str, lat_topic: str):
                 t0 = time.perf_counter()
                 self.writer.write(self.topic, data, ts)
                 dt_us = int((time.perf_counter() - t0) * 1e6)
-                m = Int64(); m.data = dt_us
+                m = Int64()
+                m.data = dt_us
                 self.lat_pub.publish(m)
             except Exception as e:
                 self.get_logger().warn(f"write error: {e}")
@@ -215,13 +241,15 @@ def writer_child(mode: str, topic: str, out_dir: str, lat_topic: str):
 # -------------------------------- main --------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Jazzy SequentialWriter, benchmark for a fixed duration, then report."
+        description="Run Python rosbag2 SequentialWriter, benchmark fixed duration, then report."
     )
-    # NOTE: duration-sec is NOT required globally so the child can reuse this parser.
-    parser.add_argument("--mode", choices=["image", "lidar"])
+    parser.add_argument("--mode", choices=["image", "lidar", "gps"])
     parser.add_argument("--duration-sec", type=int)
     parser.add_argument("--attach-existing", action="store_true",
-                        help="Attach to an already-running writer instead of launching our own")
+                        help="Attach to a running writer started by this script (to measure CPU/RSS/size).")
+    parser.add_argument("--storage-id", default="sqlite3",
+                        choices=["sqlite3", "mcap"],
+                        help="rosbag2 storage plugin (default: sqlite3)")
     # hidden child mode
     parser.add_argument("--writer-child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--writer-out", default="", help=argparse.SUPPRESS)
@@ -235,38 +263,49 @@ def main():
             print("[ERROR] --mode is required in child mode")
             sys.exit(2)
         mode = args.mode
-        topic = args.topic or (IMAGE_TOPIC if mode == "image" else LIDAR_TOPIC)
+        if mode == "image":
+            topic = args.topic or IMAGE_TOPIC
+        elif mode == "lidar":
+            topic = args.topic or LIDAR_TOPIC
+        else:
+            topic = args.topic or GPS_TOPIC
         lat_topic = args.lat_topic or "/rosbag/writer_latency_us/run_default"
-        writer_child(mode, topic, args.writer_out, lat_topic)
+        writer_child(mode, topic, args.writer_out, lat_topic,
+                     storage_id=args.storage_id)
         return
 
     # Parent validation
     if not args.mode or not args.duration_sec:
-        print("usage: rosbag_report.py --mode {image,lidar} --duration-sec N [--attach-existing]")
+        print("usage: rosbag_report.py --mode {image,lidar,gps} --duration-sec N "
+              "[--storage-id sqlite3|mcap] "
+              "[--attach-existing]")
         sys.exit(2)
 
-    # Parent setup
     mode = args.mode
-    topic = IMAGE_TOPIC if mode == "image" else LIDAR_TOPIC
-    patterns = IMAGE_PATTERNS if mode == "image" else LIDAR_PATTERNS
+    if mode == "image":
+        topic = IMAGE_TOPIC
+    elif mode == "lidar":
+        topic = LIDAR_TOPIC
+    else:
+        topic = GPS_TOPIC
 
-    # Unique run id & latency topic (must not start with a number)
+    patterns = get_patterns(mode)
+
     run_id = "run_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     lat_topic = f"/rosbag/writer_latency_us/{run_id}"
 
-    # Our intended run dir (do NOT create here; let the writer create it)
     run_dir = BAG_ROOT / f"writer_{run_id}"
-    # Ensure only the ROOT exists
     BAG_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # Decide: launch own writer (default) or attach existing
+    # Decide: attach vs launch
     procs = find_processes_by_cmd_contains(patterns)
     launched = False
     spawned_proc = None
     spawned_pgid = None
     launch_t = time.time()
-    size_dir = None  # directory we will measure for size growth
+    size_dir = None
     status_str = ""
+    proc = None
 
     if args.attach_existing and procs:
         print(f"[OK] Attaching to existing rosbag writer for metrics.")
@@ -279,8 +318,9 @@ def main():
         size_dir = ext_dir if ext_dir else BAG_ROOT
         print(f"[INFO] Measuring size at: {size_dir}")
         status_str = "attached to existing"
+        launched = False
     else:
-        print(f"[INFO] No attach (or none found). Launching internal writer...")
+        print(f"[INFO] No attach (or none found). Launching internal writer (Python path only)...")
         script_path = os.path.abspath(sys.argv[0])
         try:
             spawned_proc = subprocess.Popen(
@@ -289,7 +329,8 @@ def main():
                  "--writer-child",
                  "--writer-out", str(run_dir),
                  "--topic", topic,
-                 "--lat-topic", lat_topic],
+                 "--lat-topic", lat_topic,
+                 "--storage-id", args.storage_id],
                 preexec_fn=os.setsid
             )
             spawned_pgid = os.getpgid(spawned_proc.pid)
@@ -297,7 +338,6 @@ def main():
             print(f"[ERROR] Failed to launch writer: {e}")
             sys.exit(1)
 
-        # give child time to start and register
         time.sleep(2.0)
         procs = find_processes_by_cmd_contains(patterns)
         if not procs:
@@ -310,11 +350,7 @@ def main():
             sys.exit(2)
         launched = True
         proc = pick_heaviest(procs)
-        try:
-            cmdline = " ".join(proc.cmdline())
-        except psutil.Error:
-            cmdline = "<unavailable>"
-        size_dir = run_dir  # measure exactly where we told child to write
+        size_dir = run_dir
         status_str = "launched now"
         print(f"[OK] Writer launched (pid={spawned_proc.pid}), topic={topic}, out={run_dir}")
         print(f"[INFO] Using unique latency topic: {lat_topic}")
@@ -322,8 +358,8 @@ def main():
     # Metrics prep
     start_time = time.time()
     end_time = start_time + max(1, int(args.duration_sec))
-    Path(size_dir).parent.mkdir(parents=True, exist_ok=True)  # parent exists; child will create leaf
-    size_before = du_bytes(size_dir) if size_dir.exists() else 0  # may be 0 before child creates
+    Path(size_dir).parent.mkdir(parents=True, exist_ok=True)
+    size_before = du_bytes(size_dir) if size_dir.exists() else 0
 
     # Prime CPU measurement
     try:
@@ -333,12 +369,11 @@ def main():
 
     cpu_samples, rss_samples = [], []
 
-    # Parent ROS: collect ONLY our unique latency topic
+    # Parent ROS: collect latency topic
     rclpy.init()
     lat_node = RosbagLatencyCollector(lat_topic)
     exec_ = SingleThreadedExecutor()
     exec_.add_node(lat_node)
-
     print(f"[INFO] Latency collector subscribed to {lat_topic}")
     print(f"[INFO] Beginning rosbag benchmark for {args.duration_sec} seconds...")
     print(f"[INFO] Output directory measured: {size_dir}")
@@ -374,7 +409,7 @@ def main():
         except Exception:
             pass
 
-    # Clean up child we launched
+    # Clean up child
     if launched and spawned_proc:
         print("[INFO] Cleaning up launched rosbag writer...")
         try:
@@ -389,9 +424,8 @@ def main():
                 time.sleep(0.5)
         except Exception:
             pass
-        # extra best-effort for stragglers started after launch
         try:
-            for p in find_processes_by_cmd_contains(IMAGE_PATTERNS if mode == "image" else LIDAR_PATTERNS):
+            for p in find_processes_by_cmd_contains(get_patterns(mode)):
                 try:
                     if p.create_time() >= launch_t - 1.0:
                         p.kill()
@@ -400,7 +434,7 @@ def main():
         except Exception:
             pass
 
-    # Final metrics & report (from the directory we actually measured)
+    # Final metrics & report
     duration = round(time.time() - start_time, 2)
     size_after = du_bytes(size_dir) if size_dir.exists() else 0
     size_delta_mb = human_mb(max(0, size_after - size_before))
@@ -417,9 +451,9 @@ def main():
     print("\n========== ROS2 Bag Benchmark Report ==========")
     print(f"Mode:                  {mode}")
     print(f"Status:                {status_str}")
-    print(f"PID:                   {proc.pid}")
+    print(f"PID:                   {proc.pid if proc else -1}")
     try:
-        cmdline = " ".join(proc.cmdline())
+        cmdline = " ".join(proc.cmdline()) if proc else "<unavailable>"
     except psutil.Error:
         cmdline = "<unavailable>"
     print(f"Command:               {cmdline}")
@@ -429,14 +463,16 @@ def main():
     print(f"Run duration:          {duration} s  (target: {args.duration_sec} s)")
     print("-----------------------------------------------")
     print("CPU% / Memory (RSS MB):")
-    print(f"  avg {cpu_avg}% (max {cpu_max}%), "
-          f"RSS avg {rss_avg} MB (max {rss_max} MB)")
+    print(f"  avg {cpu_avg}% (max {cpu_max}%), RSS avg {rss_avg} MB (max {rss_max} MB)")
     print("-----------------------------------------------")
     print("Writer latency (microseconds):")
     if lat_count > 0:
         print(f"  count={lat_count}, avg={lat_avg}, p50={lat_stats[50]}, p95={lat_stats[95]}")
     else:
         print("  (No writer latency messages received.)")
+    print("-----------------------------------------------")
+    print("Config / Storage options:")
+    print(f"  storage_id:          {args.storage_id}")
     print("-----------------------------------------------")
     print("Data size growth (MB):")
     print(f"  +{size_delta_mb} MB (total {human_mb(size_after)} MB in {size_dir})")
