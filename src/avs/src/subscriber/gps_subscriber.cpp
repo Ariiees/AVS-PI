@@ -2,6 +2,7 @@
 #include "gps_msgs/msg/gps_fix.hpp" 
 #include "std_msgs/msg/int64.hpp"
 #include "yaml-cpp/yaml.h"
+#include "avs/common.h"
 #include <sqlite3.h>
 #include <filesystem>
 #include <chrono>
@@ -23,6 +24,14 @@ public:
     YAML::Node common = root["common"];
     gps_topic_ = common["gps_topic"].as<std::string>();
     gps_ssd_dir_ = common["gps_ssd_dir"].as<std::string>();
+
+    if (!avs::ensureDirectory(gps_ssd_dir_, &ec)) {
+      RCLCPP_WARN(this->get_logger(),
+                  "GPS directory %s did not exist. Attempted to create it (ec=%d: %s).",
+                  gps_ssd_dir_.c_str(),
+                  ec.value(),
+                  ec.message().c_str());
+    }
 
     // Open SQLite DB
     openDatabase();
@@ -48,6 +57,9 @@ private:
   std::string gps_ssd_dir_;
   std::string gps_topic_;
   std::string db_path_;
+  std::string gps_path_;
+
+  std::error_code ec;
 
   rclcpp::Subscription<gps_msgs::msg::GPSFix>::SharedPtr subscription_;
   rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr latency_pub_;
@@ -55,15 +67,8 @@ private:
 
   void openDatabase() {
     // Create directory
-    auto now = std::chrono::system_clock::now();
-    std::time_t t = std::chrono::system_clock::to_time_t(now);
-    std::tm tm = *std::localtime(&t);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%d");
-    std::string db_name = oss.str() + ".sqlite";
-
-    fs::create_directories(gps_ssd_dir_);
-    db_path_ = (fs::path(gps_ssd_dir_) / db_name).string();
+    gps_path_ = (fs::path(gps_ssd_dir_) / avs::getCurrentDayFolder()).string();
+    db_path_ = gps_path_ + ".sqlite3";
 
     if (sqlite3_open(db_path_.c_str(), &db_) != SQLITE_OK) {
       RCLCPP_ERROR(this->get_logger(), "Failed to open DB: %s", sqlite3_errmsg(db_));
@@ -72,7 +77,7 @@ private:
 
     const char *sql =
       "CREATE TABLE IF NOT EXISTS gps_data ("
-      "ts INTEGER PRIMARY KEY, "
+      "ts_ms INTEGER PRIMARY KEY, "
       "latitude REAL, "
       "longitude REAL, "
       "altitude REAL, "
@@ -129,7 +134,7 @@ private:
 
     sqlite3_stmt *stmt;
     const char *sql =
-      "INSERT INTO gps_data (ts, latitude, longitude, altitude, cov_xx, cov_yy, cov_zz) "
+      "INSERT INTO gps_data (ts_ms, latitude, longitude, altitude, cov_xx, cov_yy, cov_zz) "
       "VALUES (?, ?, ?, ?, ?, ?, ?);";
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {

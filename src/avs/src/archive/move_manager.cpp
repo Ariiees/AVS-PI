@@ -1,6 +1,10 @@
+// move_manager.cpp
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -11,260 +15,175 @@
 
 #include <archive.h>
 #include <archive_entry.h>
-#include <yaml-cpp/yaml.h>
+#include <sqlite3.h>
 
-#include "avs/db_operation.h"
+#include "avs/common.h"         // ensureDirectory, yearMonthFromDay, sha256File
+#include "avs/db_operation.h"   // AvsDb: openArchive(), insertArchive(), pragmas
 
 namespace fs = std::filesystem;
 
-// ----------------------- Config from YAML -----------------------
-struct Config {
-  // paths
-  std::string img_ssd_dir;
-  std::string lidar_ssd_dir;
-  std::string img_hdd_dir;
-  std::string lidar_hdd_dir;
-  std::string db_dir;
+static const std::string SSD_IMAGES_ROOT = "/home/avs/DATA/SSD/images";
+static const std::string SSD_LIDAR_ROOT  = "/home/avs/DATA/SSD/lidar";
+static const std::string SSD_GPS_DIR     = "/home/avs/DATA/SSD/gps";
 
-  // topics (sensor_id)
-  std::string img_topic;
-  std::string lidar_topic;
+static const std::string HDD_IMAGES_DATA_ROOT = "/home/avs/DATA/HDD/images";
+static const std::string HDD_LIDAR_DATA_ROOT  = "/home/avs/DATA/HDD/lidar";
+static const std::string HDD_GPS_ROOT         = "/home/avs/DATA/HDD/gps";
 
-  // formats (data_type / file extension)
-  std::string img_format;   // "jpg" or "png"
-  std::string lidar_format; // "laz"
-};
+static const std::string SSD_DB_IMAGE = "/home/avs/DATA/SSD/db/avs_image.sqlite3";
+static const std::string SSD_DB_LIDAR = "/home/avs/DATA/SSD/db/avs_lidar.sqlite3";
+static const std::string HDD_DB_ARCH  = "/home/avs/DATA/HDD/db/archive.sqlite3";
 
-static bool loadConfig(const std::string& yaml_path, Config& c, std::string& err) {
-  try {
-    YAML::Node root = YAML::LoadFile(yaml_path);
-    auto common = root["common"];
-    if (!common) { err = "YAML missing 'common' section"; return false; }
-
-    c.img_ssd_dir  = common["img_ssd_dir"].as<std::string>();
-    c.lidar_ssd_dir= common["lidar_ssd_dir"].as<std::string>();
-    c.img_hdd_dir  = common["img_hdd_dir"].as<std::string>();
-    c.lidar_hdd_dir= common["lidar_hdd_dir"].as<std::string>();
-    c.db_dir       = common["db_dir"].as<std::string>();
-    c.img_topic    = common["img_topic"].as<std::string>();
-    c.lidar_topic  = common["lidar_topic"].as<std::string>();
-
-    // formats
-    auto img_dedup = root["image_dedup"];
-    auto lidar_comp= root["lidar_compress"];
-    if (!img_dedup || !lidar_comp) {
-      err = "YAML missing 'image_dedup' or 'lidar_compress' section";
-      return false;
-    }
-    c.img_format   = img_dedup["img_format"].as<std::string>();      // jpg|png
-    c.lidar_format = lidar_comp["lidar_format"].as<std::string>();   // laz
-
-    return true;
-  } catch (const std::exception& e) {
-    err = std::string("YAML parse failed: ") + e.what();
-    return false;
-  }
+// ---------- Small helpers ----------
+static bool isYmd(const std::string& s) {
+  // strict YYYY-MM-DD
+  static const std::regex re(R"(^\d{4}-\d{2}-\d{2}$)");
+  return std::regex_match(s, re);
+}
+static bool lessYmd(const std::string& a, const std::string& b) {
+  // Lexicographic compare works for YYYY-MM-DD
+  return a < b;
 }
 
-// ----------------------- CLI -----------------------
-struct Args {
-  std::string cfg_path;
-  std::string before_date;  // YYYY-MM-DD (strictly before)
-  bool dry_run{false};
-};
-
-static void usage() {
-  std::cerr << "Usage: move_manager --before YYYY-MM-DD [--dry-run]\n";
-}
-
-static bool parseArgs(int argc, char** argv, Args& a) {
-  // Fixed config path
-  a.cfg_path = "/home/avs/AVS-PI/src/avs/config/avs_config.yaml";
-
-  for (int i = 1; i < argc; ++i) {
-    std::string s(argv[i]);
-    if (s == "--before" && i + 1 < argc) {
-      a.before_date = argv[++i];
-    } else if (s == "--dry-run") {
-      a.dry_run = true;
-    } else {
-      std::cerr << "Unknown or incomplete arg: " << s << "\n";
-      return false;
+static bool parseBeforeArg(int argc, char** argv, std::string& cutoff_day) {
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::string(argv[i]) == "--before") {
+      cutoff_day = argv[i + 1];
+      if (!isYmd(cutoff_day)) {
+        std::cerr << "[ERR] --before expects YYYY-MM-DD (got '" << cutoff_day << "')\n";
+        return false;
+      }
+      return true;
     }
   }
-
-  // Validate required --before YYYY-MM-DD
-  static const std::regex date_re(R"(^\d{4}-\d{2}-\d{2}$)");
-  if (!std::regex_match(a.before_date, date_re)) {
-    std::cerr << "Missing or invalid --before (expected YYYY-MM-DD)\n";
-    return false;
-  }
-  return true;
-}
-
-
-// ----------------------- Utilities -----------------------
-static long long nowMs() {
-  using namespace std::chrono;
-  return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-}
-
-static bool dateDirIsBefore(const std::string& dirName, const std::string& cutoff) {
-  // dirName and cutoff must be "YYYY-MM-DD"
-  if (dirName.size() != 10) return false;
-  return dirName < cutoff; // lexicographic compare works for fixed format
-}
-
-static std::vector<std::string> collectDayFolders(const fs::path& base, const std::string& cutoff) {
-  std::vector<std::string> days;
-  if (!fs::exists(base) || !fs::is_directory(base)) return days;
-  for (const auto& e : fs::directory_iterator(base)) {
-    if (!e.is_directory()) continue;
-    std::string name = e.path().filename().string();
-    if (dateDirIsBefore(name, cutoff)) days.push_back(name);
-  }
-  std::sort(days.begin(), days.end());
-  return days;
-}
-
-// Parse ts_ms from filename stem: "1755719995946" (ms) OR "sec_ns" e.g., "1754955539_206530777"
-static bool parseTsMsFromStem(const std::string& stem, long long& ts_ms_out) {
-  if (!stem.empty() && std::all_of(stem.begin(), stem.end(), ::isdigit)) {
-    try { ts_ms_out = std::stoll(stem); return true; } catch (...) { return false; }
-  }
-  size_t us = stem.find('_');
-  if (us != std::string::npos) {
-    std::string sec = stem.substr(0, us);
-    std::string ns  = stem.substr(us + 1);
-    if (!sec.empty() && !ns.empty() &&
-        std::all_of(sec.begin(), sec.end(), ::isdigit) &&
-        std::all_of(ns.begin(),  ns.end(),  ::isdigit)) {
-      try {
-        long long s = std::stoll(sec);
-        long long nsll = std::stoll(ns);
-        ts_ms_out = s * 1000LL + (nsll / 1000000LL);
-        return true;
-      } catch (...) { return false; }
-    }
-  }
+  std::cerr << "Usage: " << argv[0] << " --before YYYY-MM-DD\n";
   return false;
 }
 
-struct FileEntry {
-  fs::path path;      // absolute file path
-  long long ts_ms{0};
-};
-
-// Enumerate files with extension ".ext" under <base>/<day>
-static std::vector<FileEntry> listDayFiles(const fs::path& base, const std::string& day, const std::string& extDot) {
-  std::vector<FileEntry> out;
-  fs::path dayDir = base / day;
-  if (!fs::exists(dayDir) || !fs::is_directory(dayDir)) return out;
-  for (const auto& e : fs::directory_iterator(dayDir)) {
-    if (!e.is_regular_file()) continue;
-    if (e.path().extension() == extDot) {
-      long long ts{0};
-      if (parseTsMsFromStem(e.path().stem().string(), ts)) {
-        out.push_back({ fs::absolute(e.path()), ts });
-      }
+static bool listDayFoldersBefore(const std::string& root, const std::string& cutoff,
+                                 std::vector<std::string>& days_out) {
+  days_out.clear();
+  std::error_code ec;
+  if (!fs::exists(root, ec)) return true; // nothing to do
+  for (auto& de : fs::directory_iterator(root, ec)) {
+    if (!de.is_directory(ec)) continue;
+    const auto name = de.path().filename().string();
+    if (isYmd(name) && lessYmd(name, cutoff)) {
+      days_out.push_back(name);
     }
   }
-  std::sort(out.begin(), out.end(), [](const FileEntry& a, const FileEntry& b){ return a.ts_ms < b.ts_ms; });
-  return out;
+  std::sort(days_out.begin(), days_out.end());
+  return true;
 }
 
-static bool ensureDir(const fs::path& p) {
+// Collect files with given extension; returns sorted by numeric stem (ts_ms).
+static void scanDayFiles(const fs::path& day_dir,
+                         const std::string& ext,
+                         std::vector<fs::path>& files,
+                         long long& start_ms,
+                         long long& end_ms) {
+  files.clear();
+  start_ms = LLONG_MAX;
+  end_ms   = LLONG_MIN;
+
   std::error_code ec;
-  fs::create_directories(p, ec);
-  return !ec;
-}
+  if (!fs::exists(day_dir, ec)) return;
 
-static bool rmrf(const fs::path& p) {
-  std::error_code ec;
-  fs::remove_all(p, ec);
-  return !ec;
-}
-
-static bool renameAtomic(const fs::path& tmp, const fs::path& dst) {
-  std::error_code ec;
-  fs::rename(tmp, dst, ec);
-  return !ec;
-}
-
-// ----------------------- libarchive tar writer -----------------------
-static bool writeTarFromFileList(const fs::path& ssdBase,
-                                 const std::string& day,
-                                 const std::vector<FileEntry>& files,
-                                 const fs::path& destTarTmp,
-                                 std::string& err) {
-  if (files.empty()) { err = "no files to archive"; return false; }
-
-  if (!ensureDir(destTarTmp.parent_path())) {
-    err = "failed to create parent dir: " + destTarTmp.parent_path().string();
-    return false;
+  for (auto& de : fs::directory_iterator(day_dir, ec)) {
+    if (!de.is_regular_file(ec)) continue;
+    if (de.path().extension().string() != ext) continue;
+    files.push_back(de.path());
   }
+  auto to_ts = [](const fs::path& p)->long long {
+    try {
+      return std::stoll(p.stem().string());
+    } catch (...) { return -1; }
+  };
+  std::sort(files.begin(), files.end(),
+            [&](const fs::path& a, const fs::path& b){ return to_ts(a) < to_ts(b); });
+
+  if (!files.empty()) {
+    start_ms = to_ts(files.front());
+    end_ms   = to_ts(files.back());
+  }
+}
+
+// archive per day folder to tar
+static bool archiveDayStreamingToTar(const fs::path& day_dir,
+                                     const std::string& ext,             // ".jpg" or ".laz"
+                                     const fs::path& out_tar,
+                                     const std::string& day_basename,    // "YYYY-MM-DD" for tar prefix
+                                     long long& start_ms,
+                                     long long& end_ms,
+                                     long long& file_count,
+                                     std::string* err) {
+  start_ms   = LLONG_MAX;
+  end_ms     = LLONG_MIN;
+  file_count = 0;
+
+  std::error_code ec;
+  if (!fs::exists(day_dir, ec)) return true; // nothing to do is not an error
 
   struct archive* a = archive_write_new();
-  if (!a) { err = "archive_write_new failed"; return false; }
-
-  // Plain tar; no compression (fast, HDD-friendly, minimal CPU on Pi 5)
+  if (!a) { if (err) *err = "archive_write_new failed"; return false; }
   archive_write_set_format_pax_restricted(a);
-  // Optional: set block size; default is fine. For large files you could tune:
-  // archive_write_set_bytes_per_block(a, 1024 * 1024);
-
-  if (archive_write_open_filename(a, destTarTmp.string().c_str()) != ARCHIVE_OK) {
-    err = std::string("archive_open: ") + archive_error_string(a);
+  if (archive_write_open_filename(a, out_tar.string().c_str()) != ARCHIVE_OK) {
+    if (err) *err = archive_error_string(a);
     archive_write_free(a);
     return false;
   }
 
-  constexpr size_t kBufSize = 1 << 20; // 1 MiB
-  std::vector<char> buf(kBufSize);
+  char buf[1 << 16];
+  auto to_ts = [](const fs::path& p)->long long {
+    try { return std::stoll(p.stem().string()); } catch (...) { return -1; }
+  };
 
-  for (const auto& fe : files) {
-    const fs::path& p = fe.path;
-    std::error_code fec;
-    uintmax_t fsize = fs::file_size(p, fec);
-    if (fec) {
-      err = "stat failed: " + p.string();
-      archive_write_close(a);
-      archive_write_free(a);
-      return false;
+  for (auto it = fs::directory_iterator(day_dir, ec);
+       !ec && it != fs::end(it); ++it) {
+    const auto& de = *it;
+    if (!de.is_regular_file(ec)) continue;
+    const auto& p = de.path();
+    if (p.extension().string() != ext) continue;
+
+    const long long ts = to_ts(p);
+    if (ts >= 0) {
+      if (ts < start_ms) start_ms = ts;
+      if (ts > end_ms)   end_ms   = ts;
     }
+    ++file_count;
 
-    // path in tar: "YYYY-MM-DD/<filename>"
-    std::string tarPath = day + "/" + p.filename().string();
-
-    archive_entry* entry = archive_entry_new();
-    archive_entry_set_pathname(entry, tarPath.c_str());
-    archive_entry_set_filetype(entry, AE_IFREG);
-    archive_entry_set_perm(entry, 0644);
-    archive_entry_set_size(entry, static_cast<la_int64_t>(fsize));
-
-    if (archive_write_header(a, entry) < ARCHIVE_OK) {
-      err = std::string("write_header failed: ") + archive_error_string(a);
-      archive_entry_free(entry);
-      archive_write_close(a);
-      archive_write_free(a);
-      return false;
-    }
+    // tar path: YYYY-MM-DD/<filename>
+    const std::string tar_path = (fs::path(day_basename) / p.filename()).string();
 
     std::ifstream ifs(p, std::ios::binary);
     if (!ifs) {
-      err = "open failed: " + p.string();
+      if (err) *err = "open file failed: " + p.string();
+      archive_write_close(a);
+      archive_write_free(a);
+      return false;
+    }
+
+    struct archive_entry* entry = archive_entry_new();
+    archive_entry_set_pathname(entry, tar_path.c_str());
+    archive_entry_set_filetype(entry, AE_IFREG);
+    archive_entry_set_perm(entry, 0644);
+    const auto sz = fs::file_size(p, ec);
+    archive_entry_set_size(entry, static_cast<la_int64_t>(ec ? 0 : sz));
+
+    if (archive_write_header(a, entry) != ARCHIVE_OK) {
+      if (err) *err = std::string("write_header failed: ") + archive_error_string(a);
       archive_entry_free(entry);
       archive_write_close(a);
       archive_write_free(a);
       return false;
     }
 
-    while (ifs) {
-      ifs.read(buf.data(), static_cast<std::streamsize>(buf.size()));
-      std::streamsize got = ifs.gcount();
-      if (got > 0) {
-        la_ssize_t w = archive_write_data(a, buf.data(), static_cast<size_t>(got));
-        if (w < 0) {
-          err = std::string("write_data failed: ") + archive_error_string(a);
+    while (ifs.good()) {
+      ifs.read(buf, sizeof(buf));
+      std::streamsize n = ifs.gcount();
+      if (n > 0) {
+        if (archive_write_data(a, buf, static_cast<size_t>(n)) < 0) {
+          if (err) *err = std::string("write_data failed: ") + archive_error_string(a);
           archive_entry_free(entry);
           archive_write_close(a);
           archive_write_free(a);
@@ -272,191 +191,285 @@ static bool writeTarFromFileList(const fs::path& ssdBase,
         }
       }
     }
-
     archive_entry_free(entry);
   }
 
-  if (archive_write_close(a) != ARCHIVE_OK) {
-    err = std::string("archive_close failed: ") + archive_error_string(a);
-    archive_write_free(a);
+  archive_write_close(a);
+  archive_write_free(a);
+
+  if (file_count == 0) {
+    // no files found; treat as no-op
+    start_ms = 0; end_ms = 0;
+  }
+  return true;
+}
+
+
+// Try to read min/max/row_count from a GPS per-day sqlite DB.
+// Tries several (table, column) candidates; returns true on first success.
+static bool probeGpsDayStats(const std::string& per_day_db,
+                             long long& out_min_ms,
+                             long long& out_max_ms,
+                             long long& out_rows) {
+  sqlite3* db = nullptr;
+  if (sqlite3_open_v2(per_day_db.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+    if (db) sqlite3_close(db);
     return false;
   }
-  archive_write_free(a);
-  return true;
+  sqlite3_busy_timeout(db, 2000);
+
+  struct Candidate { const char* table; const char* col; };
+  static const Candidate CANDS[] = {
+    {"gps_data", "ts_ms"},
+    {"gps",      "ts_ms"},
+    {"oem7",     "ts_ms"},
+    {"gps_data", "timestamp_ms"},
+    {"gps",      "timestamp_ms"}
+  };
+
+  bool ok = false;
+  for (const auto& c : CANDS) {
+    std::string sql = std::string("SELECT MIN(") + c.col + "), MAX(" + c.col + "), COUNT(1) FROM " + c.table + ";";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) continue;
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+      if (sqlite3_column_type(stmt, 0) != SQLITE_NULL &&
+          sqlite3_column_type(stmt, 1) != SQLITE_NULL) {
+        out_min_ms = sqlite3_column_int64(stmt, 0);
+        out_max_ms = sqlite3_column_int64(stmt, 1);
+        out_rows   = sqlite3_column_int64(stmt, 2);
+        ok = true;
+        sqlite3_finalize(stmt);
+        break;
+      }
+    }
+    sqlite3_finalize(stmt);
+  }
+  sqlite3_close(db);
+  return ok;
 }
 
-// ----------------------- Day processing -----------------------
-struct WorkStats { size_t days_considered{0}, days_archived{0}, files_archived{0}; };
+// ---------- Archive flows ----------
 
-static bool processOneDay(
-    const std::string& kind,               // "images"/"lidar"
-    const fs::path& ssdBase,               // SSD base dir
-    const fs::path& hddBase,               // HDD base dir
-    const std::string& extDot,             // ".jpg" / ".png" / ".laz"
-    const std::string& sensor_id,          // from YAML topic
-    const std::string& data_type,          // format, e.g., "jpg"/"png"/"laz"
-    const std::string& day,                // YYYY-MM-DD
-    bool dryRun,
-    avs::AvsDb& hotDb,                     // opened hot DB
-    avs::AvsDb& archiveDb,                 // opened archive DB
-    WorkStats& stats)
-{
-  stats.days_considered++;
+static bool archiveOneSensorDay(const std::string& group,          // "images" | "lidar"
+                                const std::string& ssd_root,       // per-day folder root on SSD
+                                const std::string& hdd_data_root,  // HDD data root
+                                const std::string& ssd_hot_db,     // SSD avs_data DB
+                                const std::string& day,
+                                const std::string& ext,            // ".jpg" or ".laz"
+                                avs::AvsDb& archiveDb) {
+  const fs::path day_dir = fs::path(ssd_root) / day;
 
-  auto files = listDayFiles(ssdBase, day, extDot);
+  std::vector<fs::path> files;
+  long long start_ms = 0, end_ms = 0, file_count = 0;
+  scanDayFiles(day_dir, ext, files, start_ms, end_ms);
+
   if (files.empty()) {
-    std::cout << "[" << kind << "] " << day << ": no " << extDot << " files; skip.\n";
+    // Nothing to archive for this day; remove empty dir to keep tidy (best-effort)
+    std::error_code ec;
+    fs::remove(day_dir, ec);
+    std::cout << "[INFO] " << group << " " << day << ": no files\n";
     return true;
   }
-  const int tar_file_count = static_cast<int>(files.size());
-  std::cout << "[" << kind << "] " << day << ": " << tar_file_count << " files.\n";
 
-  fs::path dayDir    = ssdBase / day;
-  fs::path hddTarDir = hddBase; // tar lives directly under HDD base
-  fs::path hddTar    = hddTarDir / (day + ".tar");
-  fs::path hddTarTmp = hddTarDir / (day + ".tar.tmp");
+  const auto [Y, M] = avs::yearMonthFromDay(day);
+  fs::path hdd_dir = fs::path(hdd_data_root) / Y / M;
+  std::error_code ec;
+  if (!avs::ensureDirectory(hdd_dir.string(), &ec)) {
+    std::cerr << "[ERR] ensureDirectory failed: " << hdd_dir << " (" << ec.message() << ")\n";
+    return false;
+  }
+  fs::path out_tar = hdd_dir / (day + ".tar");
 
-  if (fs::exists(hddTar)) {
-    std::cout << "  Tar already exists: " << hddTar << " (idempotent).\n";
+  std::string why;
+  if (!archiveDayStreamingToTar(day_dir, ext, out_tar, day, start_ms, end_ms, file_count, &why)) {
+    std::cerr << "[ERR] writeTar failed for " << day_dir << " -> " << out_tar << ": " << why << "\n";
+    return false;
   }
 
-  if (!dryRun && !fs::exists(hddTar)) {
-    std::string werr;
-    if (!writeTarFromFileList(ssdBase, day, files, hddTarTmp, werr)) {
-      std::cerr << "  ERROR: tar write failed: " << werr << "\n";
-      return false;
-    }
-    if (!renameAtomic(hddTarTmp, hddTar)) {
-      std::cerr << "  ERROR: rename tmp -> final failed\n";
-      return false;
-    }
-  } else if (dryRun) {
-    std::cout << "  [dry-run] would write tar " << hddTar << "\n";
+  // Compute sha256 for integrity (optional)
+  std::string sha_hex;
+  (void)avs::sha256File(out_tar.string(), sha_hex);
+
+  // Insert archive row
+  avs::AvsArchRow row;
+  row.table        = (group == "images") ? "archive_images" : "archive_lidar";
+  row.sensor_group = group;
+  row.day          = day;
+  row.path         = out_tar.string();
+  row.start_ms     = start_ms;
+  row.end_ms       = end_ms;
+  row.file_count   = static_cast<long long>(files.size());
+  row.archived_ms  = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch()).count());
+  row.sha256_hex   = sha_hex;
+
+  std::string dberr;
+  if (!archiveDb.insertArchive(row, &dberr)) {
+    std::cerr << "[ERR] insertArchive failed: " << dberr << "\n";
+    return false;
   }
 
-  // DB updates
-  const long long archived_at = nowMs();
-
-  if (!dryRun) {
-    if (!archiveDb.beginTx()) { std::cerr << "  ERROR: archive beginTx\n"; return false; }
-    bool ok = true;
-    for (const auto& f : files) {
-      avs::AvsArchRow ar;
-      ar.sensor_id      = sensor_id;
-      ar.data_type      = data_type;
-      ar.ts_ms          = f.ts_ms;
-      ar.path           = hddTar.string();
-      ar.archive_ts_ms  = archived_at;
-      ar.tar_file_count = tar_file_count;
-      if (!archiveDb.insertArchiveRow(ar)) { ok = false; break; }
-    }
-    if (ok) ok = archiveDb.commitTx(); else archiveDb.rollbackTx();
-    if (!ok) { std::cerr << "  ERROR: archive insert failed\n"; return false; }
-
-    if (!hotDb.beginTx()) { std::cerr << "  ERROR: hot beginTx\n"; return false; }
-    ok = true;
-    for (const auto& f : files) {
-      if (!hotDb.deleteRow(sensor_id, data_type, f.ts_ms)) { ok = false; break; }
-    }
-    if (ok) ok = hotDb.commitTx(); else hotDb.rollbackTx();
-    if (!ok) { std::cerr << "  ERROR: hot delete failed; SSD left intact.\n"; return false; }
-  } else {
-    std::cout << "  [dry-run] would insert " << files.size() << " archive rows and delete hot rows\n";
+  // Delete rows from hot DB by type/range
+  if (!archiveDb.hotDbDeleteRangeByType(ssd_hot_db, ext, start_ms, end_ms, &dberr)) {
+    std::cerr << "[WARN] hotDb deletion failed (continuing): " << dberr << "\n";
   }
 
-  // Remove SSD day folder last
-  if (!dryRun) {
-    if (!rmrf(dayDir)) {
-      std::cerr << "  WARNING: failed to remove SSD dir " << dayDir << "\n";
-    }
-  } else {
-    std::cout << "  [dry-run] would remove " << dayDir << "\n";
+  // Remove the original day folder from SSD
+  fs::remove_all(day_dir, ec);
+  if (ec) {
+    std::cerr << "[WARN] remove_all(" << day_dir << ") failed: " << ec.message() << "\n";
   }
 
-  stats.days_archived++;
-  stats.files_archived += files.size();
+  std::cout << "[OK]  " << group << " " << day << " -> " << out_tar << " ("
+            << files.size() << " files, " << start_ms << "-" << end_ms << ")\n";
   return true;
 }
 
-// ----------------------- main -----------------------
+static bool archiveGpsDay(const std::string& day, avs::AvsDb& archiveDb) {
+  // Source and destination paths
+  const fs::path src = fs::path(SSD_GPS_DIR) / (day + ".sqlite3");
+  if (!fs::exists(src)) {
+    // nothing to do
+    return true;
+  }
+
+  const auto [Y, M] = avs::yearMonthFromDay(day);
+  fs::path dst_dir = fs::path(HDD_GPS_ROOT) / Y / M;
+  std::error_code ec;
+  if (!avs::ensureDirectory(dst_dir.string(), &ec)) {
+    std::cerr << "[ERR] ensureDirectory failed: " << dst_dir << " (" << ec.message() << ")\n";
+    return false;
+  }
+  fs::path dst = dst_dir / (day + ".sqlite3");
+
+  // Probe stats BEFORE move (if possible), else after move.
+  long long start_ms = 0, end_ms = 0, row_cnt = 0;
+  bool probed = probeGpsDayStats(src.string(), start_ms, end_ms, row_cnt);
+
+  // First insert to archive_gps
+  std::string sha_hex;
+  (void)avs::sha256File(dst.string(), sha_hex);
+
+  avs::AvsArchRow row;
+  row.table        = "archive_gps";
+  row.sensor_group = "gps";
+  row.day          = day;
+  row.path         = dst.string();
+  row.start_ms     = start_ms;
+  row.end_ms       = end_ms;
+  row.file_count   = row_cnt;   // for gps we store row_count
+  row.archived_ms  = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch()).count());
+  row.sha256_hex   = sha_hex;
+
+  std::string dberr;
+  if (!archiveDb.insertArchive(row, &dberr)) {
+    std::cerr << "[ERR] insertArchive(gps) failed: " << dberr << "\n";
+    return false;
+  }
+
+  // Move (rename will copy across devices if needed)
+  std::error_code rec;
+  fs::rename(src, dst, rec);
+  if (rec) {
+    // fallback: copy + remove
+    rec.clear();
+    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, rec);
+    if (rec) {
+      std::cerr << "[ERR] copy_file " << src << " -> " << dst << " failed: " << rec.message() << "\n";
+      return false;
+    }
+    fs::remove(src, rec);
+    if (rec) std::cerr << "[WARN] remove src failed: " << rec.message() << "\n";
+  }
+
+  std::cout << "[OK]  gps " << day << " -> " << dst
+            << " (rows=" << row_cnt << ", " << start_ms << "-" << end_ms << ")\n";
+  return true;
+}
+
+// ---------- Main ----------
+
 int main(int argc, char** argv) {
-  Args args;
-  if (!parseArgs(argc, argv, args)) { usage(); return 2; }
+  std::ios::sync_with_stdio(false);
 
-  Config cfg;
-  std::string err;
-  if (!loadConfig(args.cfg_path, cfg, err)) {
-    std::cerr << "ERROR: " << err << "\n";
-    return 1;
+  std::string cutoff;
+  if (!parseBeforeArg(argc, argv, cutoff)) return 2;
+
+  // Prepare archive DB on HDD (single DB with all three tables).
+  avs::AvsDb archiveDb;
+  {
+    std::string err;
+    if (!archiveDb.openArchive(HDD_DB_ARCH, &err)) {
+      std::cerr << "[ERR] openArchive failed: " << err << "\n";
+      return 3;
+    }
   }
 
-  // Derive DB paths (single db_dir hosting hot + archive DBs)
-  const fs::path dbdir(cfg.db_dir);
-  const fs::path imageHotDbPath = dbdir / "avs_image.sqlite3";
-  const fs::path lidarHotDbPath = dbdir / "avs_lidar.sqlite3";
-  const fs::path archiveDbPath  = dbdir / "avs_archive.sqlite3";
-
-  // Ensure HDD target dirs
-  if (!ensureDir(cfg.img_hdd_dir) || !ensureDir(cfg.lidar_hdd_dir) || !ensureDir(cfg.db_dir)) {
-    std::cerr << "ERROR: failed to ensure output directories\n";
-    return 1;
+  // 1) IMAGES
+  const auto t0 = std::chrono::steady_clock::now();
+  std::vector<std::string> img_days;
+  (void)listDayFoldersBefore(SSD_IMAGES_ROOT, cutoff, img_days);
+  for (const auto& day : img_days) {
+    if (!archiveOneSensorDay("images",
+                             SSD_IMAGES_ROOT,
+                             HDD_IMAGES_DATA_ROOT,
+                             SSD_DB_IMAGE,
+                             day,
+                             "jpg",
+                             archiveDb)) {
+      std::cerr << "[ERR] images day failed: " << day << "\n";
+    }
+  }
+  const auto t1 = std::chrono::steady_clock::now();
+  // 2) LIDAR
+  std::vector<std::string> lidar_days;
+  (void)listDayFoldersBefore(SSD_LIDAR_ROOT, cutoff, lidar_days);
+  for (const auto& day : lidar_days) {
+    if (!archiveOneSensorDay("lidar",
+                             SSD_LIDAR_ROOT,
+                             HDD_LIDAR_DATA_ROOT,
+                             SSD_DB_LIDAR,
+                             day,
+                             "laz",
+                             archiveDb)) {
+      std::cerr << "[ERR] lidar day failed: " << day << "\n";
+    }
   }
 
-  // Open DBs
-  avs::AvsDb archiveDb, imageHotDb, lidarHotDb;
-  if (!archiveDb.openArchive(archiveDbPath.string(), &err)) { std::cerr << "ERROR: openArchive: " << err << "\n"; return 1; }
-  if (!imageHotDb.open(imageHotDbPath.string(), &err))      { std::cerr << "ERROR: open image DB: " << err << "\n"; return 1; }
-  if (!lidarHotDb.open(lidarHotDbPath.string(), &err))      { std::cerr << "ERROR: open lidar DB: " << err << "\n"; return 1; }
-
-  // Build extension strings with dot
-  const std::string imgExtDot   = "." + cfg.img_format;      // ".jpg" or ".png"
-  const std::string lidarExtDot = "." + cfg.lidar_format;    // ".laz"
-
-  // Collect days
-  auto imgDays   = collectDayFolders(cfg.img_ssd_dir,   args.before_date);
-  auto lidarDays = collectDayFolders(cfg.lidar_ssd_dir, args.before_date);
-
-  WorkStats wsImg, wsLidar;
-
-  // Images first
-  for (const auto& day : imgDays) {
-    bool ok = processOneDay("images",
-                            cfg.img_ssd_dir,
-                            cfg.img_hdd_dir,
-                            imgExtDot,
-                            cfg.img_topic,
-                            cfg.img_format,
-                            day,
-                            args.dry_run,
-                            imageHotDb,
-                            archiveDb,
-                            wsImg);
-    if (!ok) std::cerr << "ERROR: failed archiving images " << day << " (continuing)\n";
+  const auto t2 = std::chrono::steady_clock::now();
+  // 3) GPS (per-day sqlite files)
+  // We iterate SSD_GPS_DIR for files "YYYY-MM-DD.sqlite3" < cutoff
+  {
+    std::error_code ec;
+    if (fs::exists(SSD_GPS_DIR, ec)) {
+      std::vector<std::string> gps_days;
+      for (auto& de : fs::directory_iterator(SSD_GPS_DIR, ec)) {
+        if (!de.is_regular_file(ec)) continue;
+        const auto name = de.path().filename().string(); // e.g., "YYYY-MM-DD.sqlite3"
+        if (name.size() != 18 || name.substr(10) != ".sqlite3") continue;
+        const std::string day = name.substr(0, 10);
+        if (isYmd(day) && lessYmd(day, cutoff)) gps_days.push_back(day);
+      }
+      std::sort(gps_days.begin(), gps_days.end());
+      for (const auto& day : gps_days) {
+        if (!archiveGpsDay(day, archiveDb)) {
+          std::cerr << "[ERR] gps day failed: " << day << "\n";
+        }
+      }
+    }
   }
+  const auto t3 = std::chrono::steady_clock::now();
 
-  // Lidar next
-  for (const auto& day : lidarDays) {
-    bool ok = processOneDay("lidar",
-                            cfg.lidar_ssd_dir,
-                            cfg.lidar_hdd_dir,
-                            lidarExtDot,
-                            cfg.lidar_topic,
-                            cfg.lidar_format,
-                            day,
-                            args.dry_run,
-                            lidarHotDb,
-                            archiveDb,
-                            wsLidar);
-    if (!ok) std::cerr << "ERROR: failed archiving lidar " << day << " (continuing)\n";
-  }
+  const auto image_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+  const auto lidar_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+  const auto gps_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
 
-  std::cout << "\n=== Summary ===\n";
-  std::cout << "Images: days considered=" << wsImg.days_considered
-            << ", archived=" << wsImg.days_archived
-            << ", files=" << wsImg.files_archived << "\n";
-  std::cout << "Lidar : days considered=" << wsLidar.days_considered
-            << ", archived=" << wsLidar.days_archived
-            << ", files=" << wsLidar.files_archived << "\n";
-  std::cout << (args.dry_run ? "[DRY-RUN]\n" : "Done.\n");
+  std::cout << "[DONE] Archive completed for days < " << cutoff << "\n";
+  std::cout << "Image archive latency: " << image_latency_us << "\n";
+  std::cout << "Lidar archive latency: " << lidar_latency_us << "\n";
+  std::cout << "GPS archive latency: " << gps_latency_us << "\n";
   return 0;
 }

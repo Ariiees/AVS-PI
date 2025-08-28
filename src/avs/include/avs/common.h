@@ -4,27 +4,77 @@
 #include <string>
 #include <chrono>
 #include <filesystem>
-
+#include <regex>
+#include <climits>
+#include <fstream>
+#include <openssl/evp.h>
 namespace avs
 {
 // --------------------------------Used in Prototype --------------------------
+// Ensure a directory exists; create if not.
+// Returns true if the directory exists (either already or after creation).
+inline bool ensureDirectory(const std::string &path, std::error_code *ec_out = nullptr) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
 
-// Generate both a 13-digit ms timestamp and the corresponding filename.
-// Example filename: /home/avs/DATA/SSD/lidar_laz/1722971225678.laz
-inline std::pair<std::string, long long> getTimestampAndFilename(
-    const std::string& output_dir,
-    const std::string& extension)
-{
-  namespace fs = std::filesystem;
-  auto now = std::chrono::system_clock::now().time_since_epoch();
-  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    if (fs::exists(path, ec)) {
+        if (ec_out) *ec_out = ec;
+        return !ec && fs::is_directory(path, ec);
+    }
 
-  fs::path dir(output_dir);
-  fs::path filename = std::to_string(ms) + "." + extension;
-  std::string full_path = (dir / filename).string();
+    fs::create_directories(path, ec);
+    if (ec_out) *ec_out = ec;
+    return !ec;
+}
 
-  // return {filepath, timestamp}
-  return {full_path, ms};
+// Extract ("YYYY","MM") from "YYYY-MM-DD"
+inline std::pair<std::string,std::string> yearMonthFromDay(const std::string& ymd) {
+  return { ymd.substr(0,4), ymd.substr(5,2) };
+}
+
+
+// SHA256 of file (hex)
+inline bool sha256File(const std::string& path, std::string& out_hex) {
+  std::ifstream ifs(path, std::ios::binary);
+  if (!ifs) return false;
+
+  // OpenSSL 3.0+ (for no deprecation warnings)
+  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+  if (!ctx) return false;
+
+  const EVP_MD* md = EVP_sha256();
+  if (EVP_DigestInit_ex(ctx, md, nullptr) != 1) {
+    EVP_MD_CTX_free(ctx);
+    return false;
+  }
+
+  char buf[1 << 16];
+  while (ifs.good()) {
+    ifs.read(buf, sizeof(buf));
+    std::streamsize n = ifs.gcount();
+    if (n > 0) {
+      if (EVP_DigestUpdate(ctx, buf, static_cast<size_t>(n)) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return false;
+      }
+    }
+  }
+
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int len = 0;
+  if (EVP_DigestFinal_ex(ctx, digest, &len) != 1) {
+    EVP_MD_CTX_free(ctx);
+    return false;
+  }
+  EVP_MD_CTX_free(ctx);
+
+  static const char* HEX = "0123456789abcdef";
+  out_hex.assign(len * 2, '0');
+  for (unsigned int i = 0; i < len; ++i) {
+    out_hex[i*2]   = HEX[(digest[i] >> 4) & 0xF];
+    out_hex[i*2+1] = HEX[(digest[i])      & 0xF];
+  }
+  return true;
 }
 
 // Return today's folder name in "YYYY-MM-DD" format (local time)

@@ -121,29 +121,39 @@ bool AvsDb::insertRow(const AvsRow& row, std::string* err) {
   return true;
 }
 
-bool AvsDb::deleteRow(const std::string& sensor_id,
-                      const std::string& data_type,
-                      long long ts_ms,
-                      std::string* err) {
-  if (!db_) { if (err) *err = "DB not initialized"; return false; }
-
-  static const char* kSql = "DELETE FROM avs_data WHERE sensor_id=? AND data_type=? AND ts_ms=?;";
-  sqlite3_stmt* stmt{nullptr};
-  if (sqlite3_prepare_v2(db_, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
-    if (err) *err = sqlite3_errmsg(db_);
+bool AvsDb::hotDbDeleteRangeByType(const std::string& db_path,
+                                   const std::string& data_type,
+                                   long long start_ms,
+                                   long long end_ms,
+                                   std::string* err) {
+  sqlite3* db = nullptr;
+  if (sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
+    if (err) *err = sqlite3_errmsg(db);
+    if (db) sqlite3_close(db);
     return false;
   }
+  sqlite3_busy_timeout(db, 3000);
+  sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+  sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
+
+  const char* sql = "DELETE FROM avs_data WHERE data_type=? AND ts_ms BETWEEN ? AND ?;";
+  sqlite3_stmt* stmt = nullptr;
+  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    if (err) *err = sqlite3_errmsg(db);
+    sqlite3_close(db);
+    return false;
+  }
+  sqlite3_bind_text (stmt, 1, data_type.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64(stmt, 2, start_ms);
+  sqlite3_bind_int64(stmt, 3, end_ms);
 
   bool ok = true;
-  do {
-    if (sqlite3_bind_text(stmt, 1, sensor_id.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK) { ok = false; break; }
-    if (sqlite3_bind_text(stmt, 2, data_type.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK) { ok = false; break; }
-    if (sqlite3_bind_int64(stmt, 3, ts_ms) != SQLITE_OK)                                   { ok = false; break; }
-
-    if (sqlite3_step(stmt) != SQLITE_DONE) { ok = false; if (err) *err = sqlite3_errmsg(db_); }
-  } while (false);
-
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    ok = false;
+    if (err) *err = sqlite3_errmsg(db);
+  }
   sqlite3_finalize(stmt);
+  sqlite3_close(db);
   return ok;
 }
 
@@ -242,18 +252,51 @@ bool AvsDb::updatePath(const std::string& sensor_id,
 // ---------- archive DB ----------
 
 bool AvsDb::ensureArchiveSchema(std::string* err) {
-  const char* ddl =
-      "CREATE TABLE IF NOT EXISTS avs_data ("
-      "  sensor_id TEXT NOT NULL,"
-      "  data_type TEXT NOT NULL,"
-      "  ts_ms     INTEGER NOT NULL,"
-      "  path      TEXT NOT NULL,"
-      "  archive_ts_ms INTEGER NOT NULL,"
-      "  tar_file_count INTEGER NOT NULL DEFAULT 0,"
-      "  PRIMARY KEY(sensor_id, data_type, ts_ms)"
+  // 1) Per-day archive summary tables (images / lidar / gps)
+  const char* sql_images =
+      "CREATE TABLE IF NOT EXISTS archive_images ("
+      "  sensor_group TEXT NOT NULL,"      /* 'images' */
+      "  day          TEXT NOT NULL,"      /* 'YYYY-MM-DD' */
+      "  path         TEXT NOT NULL,"      /* /HDD/images/YYYY/MM/YYYY-MM-DD.tar */
+      "  start_ms     INTEGER NOT NULL,"
+      "  end_ms       INTEGER NOT NULL,"
+      "  file_count   INTEGER NOT NULL,"
+      "  archived_ms  INTEGER NOT NULL,"
+      "  sha256_hex   TEXT"
       ");";
-  return exec(ddl, err);
+
+  const char* sql_lidar =
+      "CREATE TABLE IF NOT EXISTS archive_lidar ("
+      "  sensor_group TEXT NOT NULL,"      /* 'lidar'  */
+      "  day          TEXT NOT NULL,"
+      "  path         TEXT NOT NULL,"
+      "  start_ms     INTEGER NOT NULL,"
+      "  end_ms       INTEGER NOT NULL,"
+      "  file_count   INTEGER NOT NULL,"
+      "  archived_ms  INTEGER NOT NULL,"
+      "  sha256_hex   TEXT"
+      ");";
+
+  const char* sql_gps =
+      "CREATE TABLE IF NOT EXISTS archive_gps ("
+      "  sensor_group TEXT NOT NULL,"      /* 'gps'    */
+      "  day          TEXT NOT NULL,"
+      "  path         TEXT NOT NULL,"      /* /HDD/gps/YYYY/MM/YYYY-MM-DD.sqlite3 */
+      "  start_ms     INTEGER NOT NULL,"
+      "  end_ms       INTEGER NOT NULL,"
+      "  row_count    INTEGER,"            /* optional */
+      "  archived_ms  INTEGER NOT NULL,"
+      "  sha256_hex   TEXT"
+      ");";
+
+
+  if (!exec(sql_images, err)) return false;
+  if (!exec(sql_lidar,  err)) return false;
+  if (!exec(sql_gps,    err)) return false;
+
+  return true;
 }
+
 
 bool AvsDb::openArchive(const std::string& db_path, std::string* err) {
   // Close any previous handle on this instance.
@@ -270,35 +313,53 @@ bool AvsDb::openArchive(const std::string& db_path, std::string* err) {
   if (!configurePragmas(err)) return false;
   if (!ensureArchiveSchema(err)) return false;
 
-  static const char* kInsertSql =
-      "INSERT OR IGNORE INTO avs_data "
-      "(sensor_id, data_type, ts_ms, path, archive_ts_ms, tar_file_count) "
-      "VALUES (?, ?, ?, ?, ?, ?);";
-  if (sqlite3_prepare_v2(db_, kInsertSql, -1, &insert_archive_stmt_, nullptr) != SQLITE_OK) {
-    if (err) *err = sqlite3_errmsg(db_);
-    return false;
-  }
   return true;
 }
 
-bool AvsDb::insertArchiveRow(const AvsArchRow& row, std::string* err) {
-  if (!db_ || !insert_archive_stmt_) { if (err) *err = "DB not initialized"; return false; }
+bool AvsDb::insertArchive(const AvsArchRow& row, std::string* err) {
+  if (!db_) { if (err) *err = "DB not initialized"; return false; }
 
-  sqlite3_reset(insert_archive_stmt_);
-  sqlite3_clear_bindings(insert_archive_stmt_);
+  // Ensure the correct archive table exists
+  if (!ensureArchiveSchema(err)) return false;
 
-  if (sqlite3_bind_text (insert_archive_stmt_, 1, row.sensor_id.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK) { if (err) *err = sqlite3_errmsg(db_); return false; }
-  if (sqlite3_bind_text (insert_archive_stmt_, 2, row.data_type.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK) { if (err) *err = sqlite3_errmsg(db_); return false; }
-  if (sqlite3_bind_int64(insert_archive_stmt_, 3, row.ts_ms) != SQLITE_OK)                                     { if (err) *err = sqlite3_errmsg(db_); return false; }
-  if (sqlite3_bind_text (insert_archive_stmt_, 4, row.path.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK)        { if (err) *err = sqlite3_errmsg(db_); return false; }
-  if (sqlite3_bind_int64(insert_archive_stmt_, 5, row.archive_ts_ms) != SQLITE_OK)                              { if (err) *err = sqlite3_errmsg(db_); return false; }
-  if (sqlite3_bind_int  (insert_archive_stmt_, 6, row.tar_file_count) != SQLITE_OK)                             { if (err) *err = sqlite3_errmsg(db_); return false; }
+  std::ostringstream oss;
+  if (row.sensor_group == "gps") {
+    oss << "INSERT INTO " << row.table
+      << " (sensor_group, day, path, start_ms, end_ms, row_count, archived_ms, sha256_hex) "
+      << "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);";
+  } else {
+    oss << "INSERT INTO " << row.table
+      << " (sensor_group, day, path, start_ms, end_ms, file_count, archived_ms, sha256_hex) "
+      << "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);";
+  }
+  const std::string sql = oss.str();
 
-  if (sqlite3_step(insert_archive_stmt_) != SQLITE_DONE) {
+  sqlite3_stmt* stmt{nullptr};
+  if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
     if (err) *err = sqlite3_errmsg(db_);
     return false;
   }
-  return true;
+
+  sqlite3_bind_text (stmt, 1, row.sensor_group.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 2, row.day.c_str(),          -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 3, row.path.c_str(),         -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64(stmt, 4, row.start_ms);
+  sqlite3_bind_int64(stmt, 5, row.end_ms);
+  sqlite3_bind_int64(stmt, 6, row.file_count);
+  sqlite3_bind_int64(stmt, 7, row.archived_ms);
+  if (!row.sha256_hex.empty())
+    sqlite3_bind_text(stmt, 8, row.sha256_hex.c_str(), -1, SQLITE_TRANSIENT);
+  else
+    sqlite3_bind_null(stmt, 8);
+
+  bool ok = true;
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    ok = false;
+    if (err) *err = sqlite3_errmsg(db_);
+  }
+
+  sqlite3_finalize(stmt);
+  return ok;
 }
 
 } // namespace avs

@@ -33,16 +33,24 @@ public:
 
     lidar_topic_ = common["lidar_topic"].as<std::string>();
     lidar_ssd_dir_ = common["lidar_ssd_dir"].as<std::string>();
-    db_dir_ = common["db_dir"].as<std::string>();
+    db_dir_ = common["hot_db_dir"].as<std::string>();
     lidar_ext_ = dedup["lidar_format"].as<std::string>();
 
     lidar_path_ = (fs::path(lidar_ssd_dir_) / avs::getCurrentDayFolder()).string();
-
+    if (!avs::ensureDirectory(lidar_path_, &ec)) {
+      RCLCPP_WARN(this->get_logger(),
+                  "Lidar directory %s did not exist. Attempted to create it (ec=%d: %s).",
+                  lidar_path_.c_str(),
+                  ec.value(),
+                  ec.message().c_str());
+    }
+    
     downsampler_ = std::make_shared<LidarDownsampler>(config_path);
     compressor_ = std::make_shared<LidarCompressor>(lidar_path_);
 
     fs::create_directories(db_dir_);
     const std::string db_path = (fs::path(db_dir_) / "avs_lidar.sqlite3").string();
+   
     std::string err;
     if (!db_.open(db_path, &err)) {
       throw std::runtime_error("Failed to open DB: " + err);
@@ -65,12 +73,14 @@ private:
   void lidarCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
   {
     auto t0 = std::chrono::steady_clock::now();
+
+    long long ts_ms = msg->header.stamp.sec * 1000LL + msg->header.stamp.nanosec / 1000000LL;
+    std::string filepath = lidar_path_ + '/' + std::to_string(ts_ms) + "." + lidar_ext_;
+
     pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_cloud(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::fromROSMsg(*msg, *pcl_cloud);
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr downsampled = downsampler_->downsample(pcl_cloud);
-
-    auto [filepath, ts_ms] = avs::getTimestampAndFilename(this->lidar_path_, lidar_ext_);
 
     try {
       compressor_->saveAsLAZ(downsampled, filepath);
@@ -146,6 +156,8 @@ private:
   std::string lidar_ext_;
 
   std::string lidar_path_;
+
+  std::error_code ec;
 
   std::shared_ptr<LidarDownsampler> downsampler_;
   std::shared_ptr<LidarCompressor> compressor_;

@@ -33,10 +33,17 @@ public:
 
     image_topic_ = common["img_topic"].as<std::string>();
     image_ssd_dir_ = common["img_ssd_dir"].as<std::string>();
-    db_dir_ = common["db_dir"].as<std::string>();
+    db_dir_ = common["hot_db_dir"].as<std::string>();
     image_ext_ = dedup["img_format"].as<std::string>();
 
     image_path_ = (fs::path(image_ssd_dir_) / avs::getCurrentDayFolder()).string();
+    if (!avs::ensureDirectory(image_path_, &ec)) {
+      RCLCPP_WARN(this->get_logger(),
+                  "Image directory %s did not exist. Attempted to create it (ec=%d: %s).",
+                  image_path_.c_str(),
+                  ec.value(),
+                  ec.message().c_str());
+    }
 
     deduplicator_ = std::make_shared<ImgDeduplicator>(image_path_, config_path);
 
@@ -66,8 +73,8 @@ private:
   {
     const auto t0 = std::chrono::steady_clock::now();
 
-    // Build filename from wall-clock ms so the on-disk name is friendly/stable.
-    auto [filepath, ts_ms] = avs::getTimestampAndFilename(image_path_, image_ext_);
+    long long ts_ms = msg->header.stamp.sec * 1000LL + msg->header.stamp.nanosec / 1000000LL;
+    std::string filepath = image_path_ + '/' + std::to_string(ts_ms) + "." + image_ext_;
 
     bool is_unique = false;
     try {
@@ -145,18 +152,17 @@ private:
 
 
 private:
-  // Config/state
   std::string image_topic_;
   std::string image_ssd_dir_;
   std::string db_dir_;
   std::string image_ext_;
   std::string image_path_;
 
-  // Helpers
+  std::error_code ec;
+
   std::shared_ptr<ImgDeduplicator> deduplicator_;
   AvsDb db_;
 
-  // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_;
   rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr latency_pub_;
 };

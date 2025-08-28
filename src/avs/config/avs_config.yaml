@@ -5,7 +5,9 @@ common:
   img_hdd_dir: /home/avs/DATA/HDD/images
   lidar_hdd_dir: /home/avs/DATA/HDD/lidar
   gps_hdd_dir: /home/avs/DATA/HDD/gps
-  db_dir:  /home/avs/DATA/SSD/DB
+  
+  hot_db_dir:  /home/avs/DATA/SSD/db
+  cold_db_dir: /home/avs/DATA/HDD/db
 
   img_topic: /my_camera/pylon_ros2_camera_node/image_raw  #/camera/image for KITTI
   lidar_topic:  /sensing/lidar/top/pointcloud      #/lidar/pointcloud for KITTI

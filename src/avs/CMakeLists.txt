@@ -16,6 +16,8 @@ find_package(Boost REQUIRED COMPONENTS filesystem)
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 find_package(gps_msgs REQUIRED)  
+find_package(OpenSSL REQUIRED)
+
 
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 pkg_check_modules(ROCKSDB REQUIRED rocksdb)
@@ -194,6 +196,7 @@ target_link_libraries(archive_move
   ${LIBARCHIVE_LIBRARIES}
   ${SQLITE3_LIBRARIES}
   yaml-cpp
+  OpenSSL::Crypto
 )
 
 # ========== Install Targets ==========

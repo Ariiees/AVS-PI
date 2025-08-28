@@ -13,12 +13,16 @@ struct AvsRow {
 };
 
 struct AvsArchRow {
-  std::string sensor_id;
-  std::string data_type;
-  long long   ts_ms{0};
-  std::string path;
-  long long   archive_ts_ms{0};
-  int         tar_file_count{0};
+  // target table name: "archive_images" | "archive_lidar" | "archive_gps"
+  std::string table;
+  std::string sensor_group;  // "images" | "lidar" | "gps"
+  std::string day;           // "YYYY-MM-DD"
+  std::string path;          // HDD path to .tar (images/lidar) or .sqlite3 (gps)
+  long long   start_ms{0};   // earliest ts in container (or per-day gps DB)
+  long long   end_ms{0};     // latest ts
+  long long   file_count{0}; // images/lidar: file count; gps: row_count
+  long long   archived_ms{0};
+  std::string sha256_hex;    // optional
 };
 
 class AvsDb {
@@ -41,10 +45,11 @@ public:
   // ---------- Hot DB (SSD) ----------
   bool open(const std::string& db_path, std::string* err = nullptr);
   bool insertRow(const AvsRow& row, std::string* err = nullptr);
-  bool deleteRow(const std::string& sensor_id,
-                 const std::string& data_type,
-                 long long ts_ms,
-                 std::string* err = nullptr);
+  bool hotDbDeleteRangeByType(const std::string& db_path,
+                              const std::string& data_type,
+                              long long start_ms,
+                              long long end_ms,
+                              std::string* err); 
 
   // Range query using local wall times "YYYY-M-D_HH-MM" (seconds assumed 00)
   bool queryByWallRange(const std::string& sensor_id,
@@ -62,7 +67,7 @@ public:
 
   // ---------- Cold DB (HDD / archive) ----------
   bool openArchive(const std::string& db_path, std::string* err = nullptr);
-  bool insertArchiveRow(const AvsArchRow& row, std::string* err = nullptr);
+  bool insertArchive(const AvsArchRow& row, std::string* err = nullptr);
 
 private:
   // state
