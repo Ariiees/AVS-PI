@@ -60,7 +60,7 @@ public:
       image_topic_, make_auto_qos(image_topic_),
       std::bind(&ImgProcessNode::imageCallback, this, _1));
     
-    latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
+    // latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
 
     RCLCPP_INFO(this->get_logger(),
                 "AVS Image node started. Subscribed to %s; saving to %s; DB at %s",
@@ -71,7 +71,7 @@ private:
 
   void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
   {
-    const auto t0 = std::chrono::steady_clock::now();
+    // const auto t0 = std::chrono::steady_clock::now();
 
     long long ts_ms = msg->header.stamp.sec * 1000LL + msg->header.stamp.nanosec / 1000000LL;
     std::string filepath = image_path_ + '/' + std::to_string(ts_ms) + "." + image_ext_;
@@ -98,11 +98,11 @@ private:
         RCLCPP_ERROR(this->get_logger(), "DB insert failed: %s", err.c_str());
       } 
       
-      const auto t1 = std::chrono::steady_clock::now();
-      const auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-      std_msgs::msg::Int64 m;
-      m.data = latency_us;
-      latency_pub_->publish(m);
+      // const auto t1 = std::chrono::steady_clock::now();
+      // const auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+      // std_msgs::msg::Int64 m;
+      // m.data = latency_us;
+      // latency_pub_->publish(m);
     }
 
     // RCLCPP_INFO(this->get_logger(), "Latency: %ld µs", latency_us);

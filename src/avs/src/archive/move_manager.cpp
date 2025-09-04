@@ -257,12 +257,14 @@ static bool archiveOneSensorDay(const std::string& group,          // "images" |
                                 const std::string& hdd_data_root,  // HDD data root
                                 const std::string& ssd_hot_db,     // SSD avs_data DB
                                 const std::string& day,
-                                const std::string& ext,            // ".jpg" or ".laz"
+                                const std::string& ext_in,            // "jpg" or "laz"
                                 avs::AvsDb& archiveDb) {
   const fs::path day_dir = fs::path(ssd_root) / day;
 
   std::vector<fs::path> files;
   long long start_ms = 0, end_ms = 0, file_count = 0;
+  
+  std::string ext = "." + ext_in; // file size move need .jpg or .laz, db sized move need jpg or laz
   scanDayFiles(day_dir, ext, files, start_ms, end_ms);
 
   if (files.empty()) {
@@ -312,7 +314,7 @@ static bool archiveOneSensorDay(const std::string& group,          // "images" |
   }
 
   // Delete rows from hot DB by type/range
-  if (!archiveDb.hotDbDeleteRangeByType(ssd_hot_db, ext, start_ms, end_ms, &dberr)) {
+  if (!archiveDb.hotDbDeleteRangeByType(ssd_hot_db, ext_in, start_ms, end_ms, &dberr)) {
     std::cerr << "[WARN] hotDb deletion failed (continuing): " << dberr << "\n";
   }
 
@@ -466,10 +468,12 @@ int main(int argc, char** argv) {
   const auto image_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
   const auto lidar_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
   const auto gps_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
-
+  const auto archive_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t0).count();
+  
   std::cout << "[DONE] Archive completed for days < " << cutoff << "\n";
-  std::cout << "Image archive latency: " << image_latency_us << "\n";
-  std::cout << "Lidar archive latency: " << lidar_latency_us << "\n";
-  std::cout << "GPS archive latency: " << gps_latency_us << "\n";
+  std::cout << "[REPORT] Image archive latency: " << image_latency_us << "\n";
+  std::cout << "[REPORT] Lidar archive latency: " << lidar_latency_us << "\n";
+  std::cout << "[REPORT] GPS archive latency: " << gps_latency_us << "\n";
+  std::cout << "[REPORT] Total archive latency: " << archive_latency_us << "\n";
   return 0;
 }

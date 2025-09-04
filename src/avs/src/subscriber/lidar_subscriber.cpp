@@ -62,7 +62,7 @@ public:
       lidar_topic_, make_auto_qos(lidar_topic_),
       std::bind(&LidarProcessNode::lidarCallback, this, _1));
     
-    latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
+    // latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
     
     RCLCPP_INFO(this->get_logger(),
                 "AVS Lidar node started. Subscribed to %s; saving to %s; DB at %s",
@@ -72,7 +72,7 @@ public:
 private:
   void lidarCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
   {
-    auto t0 = std::chrono::steady_clock::now();
+    // auto t0 = std::chrono::steady_clock::now();
 
     long long ts_ms = msg->header.stamp.sec * 1000LL + msg->header.stamp.nanosec / 1000000LL;
     std::string filepath = lidar_path_ + '/' + std::to_string(ts_ms) + "." + lidar_ext_;
@@ -103,12 +103,12 @@ private:
     }
 
 
-    auto t1 = std::chrono::steady_clock::now();
-    auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    // auto t1 = std::chrono::steady_clock::now();
+    // auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
-    std_msgs::msg::Int64 m;
-    m.data = latency_us;
-    latency_pub_->publish(m);
+    // std_msgs::msg::Int64 m;
+    // m.data = latency_us;
+    // latency_pub_->publish(m);
     // RCLCPP_INFO(this->get_logger(), "Latency: %ld µs", latency_us);
   }
 

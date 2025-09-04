@@ -40,7 +40,7 @@ public:
       gps_topic_, make_auto_qos(gps_topic_),
       std::bind(&GpsSubscriber::gpsCallback, this, std::placeholders::_1));
     
-    latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
+    // latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
 
     RCLCPP_INFO(this->get_logger(),
                 "AVS GPS node started. Subscribed to %s; saving to %s",
@@ -130,7 +130,7 @@ private:
   void gpsCallback(const gps_msgs::msg::GPSFix::SharedPtr msg) {
     if (!db_) return;
 
-    const auto t0 = std::chrono::steady_clock::now();
+    // const auto t0 = std::chrono::steady_clock::now();
 
     sqlite3_stmt *stmt;
     const char *sql =
@@ -159,11 +159,11 @@ private:
     }
     sqlite3_finalize(stmt);
 
-    const auto t1 = std::chrono::steady_clock::now();
-    const auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    std_msgs::msg::Int64 m;
-    m.data = latency_us;
-    latency_pub_->publish(m);
+    // const auto t1 = std::chrono::steady_clock::now();
+    // const auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    // std_msgs::msg::Int64 m;
+    // m.data = latency_us;
+    // latency_pub_->publish(m);
   }
 };
 
