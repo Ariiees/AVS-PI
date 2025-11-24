@@ -29,6 +29,7 @@ static const std::string SSD_GPS_DIR     = "/home/avs/DATA/SSD/gps";
 static const std::string HDD_IMAGES_DATA_ROOT = "/home/avs/DATA/HDD/images";
 static const std::string HDD_LIDAR_DATA_ROOT  = "/home/avs/DATA/HDD/lidar";
 static const std::string HDD_GPS_ROOT         = "/home/avs/DATA/HDD/gps";
+static const std::string HDD_DB_ROOT = "/home/avs/DATA/HDD/db";
 
 static const std::string SSD_DB_IMAGE = "/home/avs/DATA/SSD/db/avs_image.sqlite3";
 static const std::string SSD_DB_LIDAR = "/home/avs/DATA/SSD/db/avs_lidar.sqlite3";
@@ -400,6 +401,12 @@ int main(int argc, char** argv) {
   std::string cutoff;
   if (!parseBeforeArg(argc, argv, cutoff)) return 2;
 
+  std::error_code ec;
+  if (!avs::ensureDirectory(HDD_IMAGES_DATA_ROOT, &ec) || !avs::ensureDirectory(HDD_LIDAR_DATA_ROOT, &ec) 
+    || !avs::ensureDirectory(HDD_GPS_ROOT, &ec) || !avs::ensureDirectory(HDD_DB_ROOT, &ec)) {
+      std::cerr << "Director did not exist." << ec << "\n";
+    }
+
   // Prepare archive DB on HDD (single DB with all three tables).
   avs::AvsDb archiveDb;
   {
@@ -425,7 +432,7 @@ int main(int argc, char** argv) {
       std::cerr << "[ERR] images day failed: " << day << "\n";
     }
   }
-  const auto t1 = std::chrono::steady_clock::now();
+  // const auto t1 = std::chrono::steady_clock::now();
   // 2) LIDAR
   std::vector<std::string> lidar_days;
   (void)listDayFoldersBefore(SSD_LIDAR_ROOT, cutoff, lidar_days);
@@ -441,7 +448,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  const auto t2 = std::chrono::steady_clock::now();
+  // const auto t2 = std::chrono::steady_clock::now();
   // 3) GPS (per-day sqlite files)
   // We iterate SSD_GPS_DIR for files "YYYY-MM-DD.sqlite3" < cutoff
   {
@@ -465,15 +472,15 @@ int main(int argc, char** argv) {
   }
   const auto t3 = std::chrono::steady_clock::now();
 
-  const auto image_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-  const auto lidar_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-  const auto gps_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+  // const auto image_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+  // const auto lidar_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+  // const auto gps_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
   const auto archive_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t0).count();
   
   std::cout << "[DONE] Archive completed for days < " << cutoff << "\n";
-  std::cout << "[REPORT] Image archive latency: " << image_latency_us << "\n";
-  std::cout << "[REPORT] Lidar archive latency: " << lidar_latency_us << "\n";
-  std::cout << "[REPORT] GPS archive latency: " << gps_latency_us << "\n";
+  // std::cout << "[REPORT] Image archive latency: " << image_latency_us << "\n";
+  // std::cout << "[REPORT] Lidar archive latency: " << lidar_latency_us << "\n";
+  // std::cout << "[REPORT] GPS archive latency: " << gps_latency_us << "\n";
   std::cout << "[REPORT] Total archive latency: " << archive_latency_us << "\n";
   return 0;
 }

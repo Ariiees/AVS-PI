@@ -5,8 +5,9 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 from pathlib import Path
-from typing import List, Tuple, Set
+from typing import List, Tuple, Set, Optional
 
 import psutil
 
@@ -108,9 +109,26 @@ def sample_all_trees(roots: List[psutil.Process]) -> Tuple[float, float, Set[int
                 pass
     return cpu_total, bytes_to_mb(rss_total), pid_seen
 
+# -------- Streaming tee of child output --------
+def tee_child_output(proc: subprocess.Popen, report_holder: dict) -> None:
+    """
+    Read child's merged stdout/stderr line-by-line, print through, and
+    remember the last '[REPORT] Total archive latency:' line.
+    """
+    try:
+        assert proc.stdout is not None
+        for raw in iter(proc.stdout.readline, ''):
+            # Print through immediately to preserve child logs
+            print(raw, end='')
+            if raw.startswith("[REPORT] Total archive latency:"):
+                report_holder["line"] = raw.strip()
+    except Exception:
+        # Swallow read errors; main loop handles process lifecycle
+        pass
+
 # -------- Main --------
 def parse_args():
-    ap = argparse.ArgumentParser(description="Benchmark 'ros2 run avs archive_move' end-to-end (top-level SSD/HDD deltas).")
+    ap = argparse.ArgumentParser(description="Benchmark 'ros2 run avs archive_move' end-to-end (top-level SSD/HDD deltas), while also echoing the child's [REPORT] line.")
     ap.add_argument("--before", required=True, help="Cutoff day YYYY-MM-DD to pass to archive_move.")
     ap.add_argument("--interval", type=float, default=1.0, help="Sampling interval seconds (default: 1.0).")
     ap.add_argument("--ros2-pkg",   type=str, default="avs", help="ROS 2 package name (default: avs).")
@@ -127,11 +145,22 @@ def main():
     ssd_before = dir_size_bytes(ssd_root)
     hdd_before = dir_size_bytes(hdd_root)
 
-    # Launch
+    # Launch (capture merged stdout/stderr to tee)
     cmd = ["ros2", "run", args.ros2_pkg, args.ros2_exe, "--before", args.before]
     print(f"[INFO] Launching: {' '.join(cmd)}")
-    t_start = time.time()
-    proc = subprocess.Popen(cmd)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,  # line-buffered
+    )
+
+    # Tee thread to forward child output and capture [REPORT] line
+    report_holder: dict = {"line": None}  # will store the last matching line
+    tee_thread = threading.Thread(target=tee_child_output, args=(proc, report_holder), daemon=True)
+    tee_thread.start()
 
     # Determine measurement roots: prefer leaf executables; fallback to launcher itself
     time.sleep(1.5)  # let children spawn
@@ -153,14 +182,20 @@ def main():
     pid_union: Set[int] = set()
 
     # Sample until process exits
-    while proc.poll() is None:
+    while True:
+        if proc.poll() is not None:
+            break
         time.sleep(args.interval)
         cpu, rss_mb, pid_set = sample_all_trees(roots)
         cpu_samples.append(cpu)
         rss_samples.append(rss_mb)
         pid_union.update(pid_set)
 
-    wall_s = time.time() - t_start
+    # Ensure all child output has been consumed
+    try:
+        tee_thread.join(timeout=2.0)
+    except Exception:
+        pass
 
     # Post sizes
     ssd_after = dir_size_bytes(ssd_root)
@@ -177,10 +212,9 @@ def main():
     avg_rss = round(sum(rss_samples) / len(rss_samples), 2) if rss_samples else 0.0
     peak_rss = round(max(rss_samples), 2) if rss_samples else 0.0
 
-    # Report
+    # Report (your wrapper report)
     print("\n=== Archive Move Benchmark (Top-level) ===")
     print(f"Cutoff day:               {args.before}")
-    print(f"Duration (wall):          {wall_s:.3f} s")
     print(f"Avg CPU (sum):            {avg_cpu:.2f} %")
     print(f"Peak CPU (sum):           {peak_cpu:.2f} %")
     print(f"Avg RSS (sum):            {avg_rss:.2f} MB")
@@ -196,7 +230,12 @@ def main():
         root_pids = []
     print(f"Roots considered:         {root_pids}")
     print(f"Union PIDs seen:          {len(pid_union)} processes")
-    return 0
+
+    # ALSO print the child's [REPORT] line (if present) so it's visible in your summary too
+    if report_holder.get("line"):
+        print(report_holder["line"])
+
+    return proc.returncode if proc.returncode is not None else 0
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -107,4 +107,17 @@ bool ImgDeduplicator::isUniqueAndStore(const sensor_msgs::msg::Image& img_msg, c
   return false;
 }
 
+bool ImgDeduplicator::isUnique(const sensor_msgs::msg::Image& img_msg)
+{
+  cv::Mat img = rosImgToCvMat(img_msg);
+  auto hash = computePhash(img);
+
+  if (first_image_ || hammingDistance(last_hash_, hash) > hamming_threshold_)
+  {
+    last_hash_ = hash;
+    first_image_ = false;
+    return true;
+  }
+  return false;
+}
 } // namespace avs

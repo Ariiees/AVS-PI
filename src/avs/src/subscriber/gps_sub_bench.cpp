@@ -175,7 +175,7 @@ private:
 
       sqlite3_stmt *stmt = nullptr;
       const char *sql =
-        "INSERT INTO gps_data (ts_ms, latitude, longitude, altitude, cov_xx, cov_yy, cov_zz) "
+        "INSERT OR IGNORE INTO gps_data (ts_ms, latitude, longitude, altitude, cov_xx, cov_yy, cov_zz) "
         "VALUES (?, ?, ?, ?, ?, ?, ?);";
 
       if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -184,9 +184,9 @@ private:
       }
 
       auto &msg = it.msg;
-      long long ts_ms = msg->header.stamp.sec * 1000LL + msg->header.stamp.nanosec / 1000000LL;
+      long long gps_ts_ms = msg->header.stamp.sec * 1000LL + msg->header.stamp.nanosec / 1000000LL;
 
-      sqlite3_bind_int64 (stmt, 1, ts_ms);
+      sqlite3_bind_int64 (stmt, 1, gps_ts_ms);
       sqlite3_bind_double(stmt, 2, msg->latitude);
       sqlite3_bind_double(stmt, 3, msg->longitude);
       sqlite3_bind_double(stmt, 4, msg->altitude);
@@ -216,7 +216,7 @@ private:
     qos.reliability(ReliabilityPolicy::Reliable);
     qos.durability(rclcpp::DurabilityPolicy::Volatile);
 
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 50; ++i) {
       auto infos = this->get_publishers_info_by_topic(topic);
       if (!infos.empty()) {
         auto offered = infos.front().qos_profile();

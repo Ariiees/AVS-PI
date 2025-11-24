@@ -16,7 +16,7 @@ DEFAULT_TOPICS = [
     "/sensing/lidar/top/pointcloud",
 ]
 
-DEFAULT_OUT_ROOT = Path("/home/avs/DATA/rosbag_bench")
+DEFAULT_OUT_ROOT = Path("/home/avs/DATA/SSD/rosbag_bench")
 
 # -------------------- Helpers --------------------
 def human_mb(n_bytes: int) -> float:
@@ -177,7 +177,7 @@ def main():
                     help="Override topic list. If omitted, uses default topics.")
     ap.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT,
                     help=f"Output root directory (default: {DEFAULT_OUT_ROOT})")
-    ap.add_argument("--storage-id", default="sqlite3", choices=["sqlite3"],
+    ap.add_argument("--storage-id", default="sqlite3", choices=["sqlite3", "mcap"],
                     help="rosbag2 storage plugin (sqlite3).")
     args = ap.parse_args()
 

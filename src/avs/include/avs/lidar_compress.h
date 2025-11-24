@@ -4,6 +4,7 @@
 #include <pcl/point_types.h>
 #include <string>
 
+
 namespace avs {
 
 class LidarCompressor {

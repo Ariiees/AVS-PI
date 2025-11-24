@@ -63,6 +63,27 @@ include_directories(
   ${LIBARCHIVE_INCLUDE_DIRS}
 )
 
+# --- add the append logger library (new) ---
+# add_library(avs_append_logger
+#   src/logger/append_logger.cpp
+# )
+
+# target_include_directories(avs_append_logger PUBLIC
+#   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+#   ${SQLITE3_INCLUDE_DIRS}
+# )
+
+# target_link_libraries(avs_append_logger PUBLIC
+#   ${SQLITE3_LIBRARIES}
+#   ${LIBARCHIVE_LIBRARIES}
+#   Threads::Threads
+#   dl
+# )
+
+# ament_target_dependencies(avs_append_logger
+#   rclcpp
+# )
+
 # ========== Image Reduction and Save ==========
 add_executable(image_subscriber
   src/subscriber/image_subscriber.cpp
@@ -78,6 +99,25 @@ target_link_libraries(image_subscriber
 )
 
 ament_target_dependencies(image_subscriber
+  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
+)
+
+# ========== Image Append Bnech ==========
+add_executable(image_subscriber_append
+  src/subscriber/image_subscriber_append.cpp
+  src/process/img_dedup.cpp
+  src/process/img_compress.cpp
+  src/logger/append_logger.cpp
+  src/db/db_operation.cpp
+)
+
+target_link_libraries(image_subscriber_append
+  ${OpenCV_LIBS}
+  ${SQLITE3_LIBRARIES}
+  yaml-cpp
+)
+
+ament_target_dependencies(image_subscriber_append
   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
 )
 
@@ -249,6 +289,7 @@ ament_target_dependencies(gps_sub_bench
 # ========== Install Targets ==========
 install(TARGETS
   image_subscriber
+  image_subscriber_append
   lidar_subscriber
   gps_subscriber
   fs_img_write

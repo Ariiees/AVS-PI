@@ -168,8 +168,8 @@ private:
       }
 
       const auto& msg = it.msg;
-      long long ts_ms = msg->header.stamp.sec * 1000LL + msg->header.stamp.nanosec / 1000000LL;
-      std::string filepath = image_path_ + '/' + std::to_string(ts_ms) + "." + image_ext_;
+      long long image_ts_ms = msg->header.stamp.sec * 1000LL + msg->header.stamp.nanosec / 1000000LL;
+      std::string filepath = image_path_ + '/' + std::to_string(image_ts_ms) + "." + image_ext_;
 
       bool saved = false;
       try {
@@ -187,7 +187,7 @@ private:
         AvsRow row;
         row.sensor_id = image_topic_;
         row.data_type = image_ext_;
-        row.ts_ms     = ts_ms;
+        row.ts_ms     = image_ts_ms;
         row.path      = filepath;
 
         std::string err;
@@ -212,7 +212,7 @@ private:
     qos.reliability(ReliabilityPolicy::Reliable);
     qos.durability(rclcpp::DurabilityPolicy::Volatile);
 
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 50; ++i) {
       auto infos = this->get_publishers_info_by_topic(topic);
       if (!infos.empty()) {
         auto offered = infos.front().qos_profile();

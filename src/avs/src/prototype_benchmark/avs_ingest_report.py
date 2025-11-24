@@ -224,7 +224,7 @@ def build_launch_cmd(args):
 def main():
     ap = argparse.ArgumentParser(description="Auto-launch AVS ingest nodes, collect tail-latency metrics, then stop.")
     ap.add_argument("--duration", type=float, default=60.0, help="Seconds to COLLECT metrics (excludes warmup).")
-    ap.add_argument("--warmup", type=float, default=3.0, help="Warm-up seconds before collecting (nodes spin-up).")
+    ap.add_argument("--warmup", type=float, default=100.0, help="Warm-up seconds before collecting (nodes spin-up).")
     ap.add_argument("--label", type=str, default="", help="Label to print in the report.")
     ap.add_argument("--csv", type=str, default=None, help="Optional CSV path for raw samples.")
     ap.add_argument("--no-auto", action="store_true", help="Do NOT auto-launch; just attach to running nodes.")
