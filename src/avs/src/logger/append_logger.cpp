@@ -1,4 +1,4 @@
-// ...existing code...
+// append logger implementation : segment(chunk(messages...), chunk(messages...), ...)
 #include "avs/append_logger.h"
 
 #include <filesystem>
@@ -102,15 +102,16 @@ void AppendLogger::updateGlobalRowEnd(const std::string &day, int trip_id, uint6
   sqlite3_finalize(stmt);
 }
 
-void AppendLogger::startTrip(const std::string &day, int trip_id, uint64_t start_ts_ns)
+void AppendLogger::startTrip(const std::string &day, const std::string &topic_folder, int trip_id, uint64_t start_ts_ns)
 {
   std::lock_guard<std::mutex> lk(mu_);
   if (trip_id_ != -1) throw std::runtime_error("Trip already active");
 
   day_ = day;
   trip_id_ = trip_id;
+  topic_folder_ = topic_folder;
 
-  fs::path daydir = fs::path(ssd_root_) / topic_ / day_;
+  fs::path daydir = fs::path(ssd_root_) / topic_folder_ / day_;
   std::error_code ec;
   fs::create_directories(daydir, ec);
   if (ec) throw std::system_error(ec);
@@ -139,7 +140,7 @@ void AppendLogger::startTrip(const std::string &day, int trip_id, uint64_t start
 
 void AppendLogger::openTripFiles()
 {
-  fs::path daydir = fs::path(ssd_root_) / topic_ / day_;
+  fs::path daydir = fs::path(ssd_root_) / topic_folder_ / day_;
   char tb[64];
   snprintf(tb, sizeof(tb), "trip_%02d.log", trip_id_);
   fs::path logp = daydir / tb;

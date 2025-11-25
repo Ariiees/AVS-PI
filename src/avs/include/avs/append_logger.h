@@ -44,7 +44,7 @@ public:
   ~AppendLogger();
 
   // Start a trip: creates directory, opens files, inserts global row (end_ts_ns = 0)
-  void startTrip(const std::string &day, int trip_id, uint64_t start_ts_ns);
+  void startTrip(const std::string &day, const std::string &topic_folder, int trip_id, uint64_t start_ts_ns);
 
   // Append a record (encoded payload). Thread-safe.
   void appendRecord(uint64_t ts_ns, const std::vector<uint8_t> &payload);
@@ -69,6 +69,7 @@ private:
   std::string ssd_root_;
   std::string topic_;
   std::string day_;
+  std::string topic_folder_;
   int trip_id_ = -1;
 
   std::ofstream trip_log_;

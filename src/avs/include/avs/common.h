@@ -196,6 +196,9 @@ inline bool wallRangeYmdHmToEpochMsLocal(const std::string& start_wall,
   return true;
 }
 
+// --------------------------------Used in Append Logger --------------------------
+
+
 // --------------------------------Used in Benchmark --------------------------
 inline std::string getTimestampFilename(const std::string& output_dir, const std::string& extension)
 {

@@ -102,25 +102,6 @@ ament_target_dependencies(image_subscriber
   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
 )
 
-# ========== Image Append Bnech ==========
-add_executable(image_subscriber_append
-  src/subscriber/image_subscriber_append.cpp
-  src/process/img_dedup.cpp
-  src/process/img_compress.cpp
-  src/logger/append_logger.cpp
-  src/db/db_operation.cpp
-)
-
-target_link_libraries(image_subscriber_append
-  ${OpenCV_LIBS}
-  ${SQLITE3_LIBRARIES}
-  yaml-cpp
-)
-
-ament_target_dependencies(image_subscriber_append
-  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
-)
-
 # ========== LiDAR Reduction and Save ==========
 add_executable(lidar_subscriber
   src/subscriber/lidar_subscriber.cpp
@@ -284,6 +265,27 @@ target_link_libraries(gps_sub_bench
 ament_target_dependencies(gps_sub_bench 
   rclcpp gps_msgs yaml-cpp
 ) 
+
+
+# ========== Image Append Test ==========
+add_executable(image_subscriber_append
+  src/subscriber/image_subscriber_append.cpp
+  src/process/img_dedup.cpp
+  src/logger/append_logger.cpp
+  src/logger/topic_map.cpp
+  src/logger/trip_manager.cpp
+
+)
+
+target_link_libraries(image_subscriber_append
+  ${OpenCV_LIBS}
+  ${SQLITE3_LIBRARIES}
+  yaml-cpp
+)
+
+ament_target_dependencies(image_subscriber_append
+  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
+)
 
 
 # ========== Install Targets ==========

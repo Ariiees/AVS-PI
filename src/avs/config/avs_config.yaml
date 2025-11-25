@@ -13,6 +13,9 @@ common:
   lidar_topic:  /sensing/lidar/top/pointcloud      #/lidar/pointcloud for KITTI
   gps_topic: /novatel/oem7/gps
 
+  ssd_root: /home/avs/DATA/SSD
+  hdd_root: /home/avs/DATA/HDD
+
 image_dedup:    # Deduplicate image and save each image to ssd
   hamming_threshold: 2
   img_format: jpg     # "jpg" or "png"

@@ -15,7 +15,8 @@ class ImgDeduplicator
 public:
   ImgDeduplicator(const std::string& output_dir, const std::string& config_path);
   bool isUniqueAndStore(const sensor_msgs::msg::Image& img_msg, const std::string &filename);
-  bool isUnique(const sensor_msgs::msg::Image& img_msg);
+  bool isUniqueAndGetBytes(const sensor_msgs::msg::Image& img_msg,
+                                          std::vector<uint8_t>& out_bytes);
 
 private:
   std::string output_dir_;

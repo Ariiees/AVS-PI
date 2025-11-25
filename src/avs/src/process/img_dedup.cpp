@@ -107,17 +107,28 @@ bool ImgDeduplicator::isUniqueAndStore(const sensor_msgs::msg::Image& img_msg, c
   return false;
 }
 
-bool ImgDeduplicator::isUnique(const sensor_msgs::msg::Image& img_msg)
+bool ImgDeduplicator::isUniqueAndGetBytes(const sensor_msgs::msg::Image& img_msg,
+                                          std::vector<uint8_t>& out_bytes)
 {
+  // One cv::Mat conversion
   cv::Mat img = rosImgToCvMat(img_msg);
+
+  // One pHash
   auto hash = computePhash(img);
 
+  // Dedup check
   if (first_image_ || hammingDistance(last_hash_, hash) > hamming_threshold_)
   {
+    // Encode to bytes for append logger
+    cv::imencode("." + img_format_, img, out_bytes, write_params_);
+
     last_hash_ = hash;
     first_image_ = false;
     return true;
   }
+
+  out_bytes.clear();
   return false;
 }
+
 } // namespace avs
