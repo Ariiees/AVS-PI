@@ -1,4 +1,3 @@
-// ...existing code...
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "std_msgs/msg/int64.hpp"
@@ -70,6 +69,8 @@ public:
       image_topic_, make_auto_qos(image_topic_),
       std::bind(&ImgProcessNode::imageCallback, this, _1));
     
+    latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
+    
     std::string trip_id_str = std::to_string(trip_id);
     RCLCPP_INFO(this->get_logger(),
                 "AVS Image node started. Subscribed to %s; writing to append-logger (path=%s trip=%s)",
@@ -90,6 +91,11 @@ private:
 
   void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
   {
+    // const auto t0 = std::chrono::steady_clock::now();
+    uint64_t ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::system_clock::now().time_since_epoch()
+                     ).count();
+
     bool is_unique = false;
     std::vector<uint8_t> payload;
 
@@ -101,14 +107,20 @@ private:
     }
 
     if (is_unique) {
-      uint64_t ts_ns = static_cast<uint64_t>(msg->header.stamp.sec) * 1000000000ULL
-                     + static_cast<uint64_t>(msg->header.stamp.nanosec);
+      // uint64_t ts_ns = static_cast<uint64_t>(msg->header.stamp.sec) * 1000000000ULL
+      //                + static_cast<uint64_t>(msg->header.stamp.nanosec);
 
       try {
         append_logger_->appendRecord(ts_ns, payload);
       } catch (const std::exception &e) {
         RCLCPP_ERROR(this->get_logger(), "AppendLogger appendRecord failed: %s", e.what());
       }
+
+      // const auto t1 = std::chrono::steady_clock::now();
+      // const auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+      // std_msgs::msg::Int64 m;
+      // m.data = latency_us;
+      // latency_pub_->publish(m);
     }
   }
 

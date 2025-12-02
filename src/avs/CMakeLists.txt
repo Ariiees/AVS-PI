@@ -287,6 +287,27 @@ ament_target_dependencies(image_subscriber_append
   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
 )
 
+# ========== Image Append Retrieve Test ==========
+add_executable(avs_retrieve_view
+  src/retrieve/retrieve_append_cli.cpp
+  src/logger/append_logger.cpp
+)
+
+target_link_libraries(avs_retrieve_view
+  ${OpenCV_LIBS}
+  ${SQLITE3_LIBRARIES}
+  yaml-cpp
+)
+
+ament_target_dependencies(image_subscriber_append
+  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
+)
+
+install(TARGETS avs_retrieve_view
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+
 
 # ========== Install Targets ==========
 install(TARGETS

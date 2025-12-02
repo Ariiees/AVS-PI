@@ -59,7 +59,7 @@ public:
 private:
   void openGlobalDB();
   void ensureGlobalSchema();
-  void insertGlobalRow(const std::string &day, int trip_id, uint64_t start_ts_ns);
+  void insertGlobalRow(const std::string &topic_folder, const std::string &day, int trip_id, uint64_t start_ts_ns);
   void updateGlobalRowEnd(const std::string &day, int trip_id, uint64_t end_ts_ns);
 
   void openTripFiles();

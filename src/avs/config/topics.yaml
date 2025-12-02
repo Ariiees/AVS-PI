@@ -1,14 +1,13 @@
-topic_map:
-  "my_camera/pylon_ros2_camera_node/image_raw":
-    sensor_type: image
-    folder_name: camera_front
-  
-  "sensing/lidar/top/pointcloud":
-    sensor_type: lidar
-    folder_name: lidar_top
+"/my_camera/pylon_ros2_camera_node/image_raw":
+  sensor_type: image
+  folder_name: camera_front
 
-  "novatel/oem7/gps":
-    sensor_type: gps
-    folder_name: gps_right
-    
-  # Add more topics as needed
+"/sensing/lidar/top/pointcloud":
+  sensor_type: lidar
+  folder_name: lidar_top
+
+"/novatel/oem7/gps":
+  sensor_type: gps
+  folder_name: gps_right
+  
+# Add more topics as needed

@@ -46,6 +46,7 @@ void AppendLogger::ensureGlobalSchema()
   const char *sql =
     "CREATE TABLE IF NOT EXISTS global ("
     "  sensor_topic TEXT NOT NULL,"
+    "  topic_folder TEXT NOT NULL,"
     "  day TEXT NOT NULL,"
     "  trip_id INTEGER NOT NULL,"
     "  start_ts_ns TEXT NOT NULL,"
@@ -61,19 +62,20 @@ void AppendLogger::ensureGlobalSchema()
   }
 }
 
-void AppendLogger::insertGlobalRow(const std::string &day, int trip_id, uint64_t start_ts_ns)
+void AppendLogger::insertGlobalRow(const std::string &topic_folder, const std::string &day, int trip_id, uint64_t start_ts_ns)
 {
-  const char *sql = "INSERT OR REPLACE INTO global(sensor_topic, day, trip_id, start_ts_ns, end_ts_ns) VALUES(?, ?, ?, ?, ?);";
+  const char *sql = "INSERT OR REPLACE INTO global(sensor_topic, topic_folder, day, trip_id, start_ts_ns, end_ts_ns) VALUES(?, ?, ?, ?, ?, ?);";
   sqlite3_stmt *stmt = nullptr;
   int rc = sqlite3_prepare_v2(ssd_db_, sql, -1, &stmt, nullptr);
   if (rc != SQLITE_OK) {
     throw std::runtime_error("sqlite3_prepare_v2 failed (insert)");
   }
   sqlite3_bind_text(stmt, 1, topic_.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 2, day.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 3, trip_id);
-  sqlite3_bind_text(stmt, 4, std::to_string(start_ts_ns).c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 5, "0", -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 2, topic_folder.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 3, day.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 4, trip_id);
+  sqlite3_bind_text(stmt, 5, std::to_string(start_ts_ns).c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 6, "0", -1, SQLITE_TRANSIENT);
 
   rc = sqlite3_step(stmt);
   if (rc != SQLITE_DONE) {
@@ -120,7 +122,7 @@ void AppendLogger::startTrip(const std::string &day, const std::string &topic_fo
 
   TripHeader th;
   std::memset(&th, 0, sizeof(th));
-  const char *magic = "AVS_TRIP_v1";
+  const char *magic = "AVS";
   std::strncpy(th.magic, magic, sizeof(th.magic)-1);
   th.trip_start_ts_ns = start_ts_ns;
   th.reserved = 0;
@@ -129,7 +131,7 @@ void AppendLogger::startTrip(const std::string &day, const std::string &topic_fo
 
   trip_idx_.seekp(0, std::ios::end);
 
-  insertGlobalRow(day_, trip_id_, start_ts_ns);
+  insertGlobalRow(topic_folder_, day_, trip_id_, start_ts_ns);
 
   chunk_buf_.clear();
   chunk_start_ts_ns_ = 0;
