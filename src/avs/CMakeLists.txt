@@ -310,6 +310,25 @@ ament_target_dependencies(lidar_subscriber_append
   rclcpp sensor_msgs pcl_conversions yaml-cpp
 )
 
+# ========== GPS Append Test ==========
+
+add_executable(gps_subscriber_append 
+  src/subscriber/gps_subscriber_append.cpp
+  src/logger/append_logger.cpp
+  src/logger/topic_map.cpp
+  src/logger/trip_manager.cpp 
+)
+
+target_link_libraries(gps_subscriber_append 
+   ${SQLITE3_LIBRARIES}
+   yaml-cpp
+)
+
+ament_target_dependencies(gps_subscriber_append 
+  rclcpp gps_msgs yaml-cpp
+) 
+
+
 # ========== Append Retrieve Test ==========
 add_executable(avs_retrieve_view
   src/retrieve/retrieve_append_cli.cpp
@@ -337,6 +356,7 @@ install(TARGETS
   lidar_subscriber
   lidar_subscriber_append
   gps_subscriber
+  gps_subscriber_append
   fs_img_write
   fs_lidar_write
   db_benchmark
