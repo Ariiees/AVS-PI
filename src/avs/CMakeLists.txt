@@ -317,12 +317,12 @@ add_executable(avs_retrieve_view
 )
 
 target_link_libraries(avs_retrieve_view
+  ${OpenCV_LIBS}
   ${PCL_LIBRARIES}
   ${PCL_IO_LIBRARIES}
   ${LASZIP_LIBRARY}
-  ${OpenCV_LIBS}
   ${SQLITE3_LIBRARIES}
-  yaml-cpp
+  ${VTK_LIBRARIES}
 )
 
 ament_target_dependencies(avs_retrieve_view

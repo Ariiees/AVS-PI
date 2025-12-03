@@ -14,12 +14,17 @@
 #include <laszip_api.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/visualization/pcl_visualizer.h>
 
 #include <sqlite3.h>
 #include <opencv2/opencv.hpp>
 
 #include "avs/append_logger.h" 
 
+#include <vtkObject.h>
+#if defined(VTK_MAJOR_VERSION) && (VTK_MAJOR_VERSION >= 9)
+  #include <vtkLogger.h>
+#endif
 
 namespace fs = std::filesystem;
 static const fs::path kSsdRoot("/home/avs/DATA/SSD");
@@ -33,7 +38,7 @@ static void usage(const char *p) {
 }
 
 
-static bool open_db(const fs::path &dbpath, sqlite3 **out) {
+static bool openDb(const fs::path &dbpath, sqlite3 **out) {
   int rc = sqlite3_open(dbpath.c_str(), out);
   if (rc != SQLITE_OK) {
     std::cerr << "Failed to open sqlite DB " << dbpath << ": "
@@ -46,7 +51,7 @@ static bool open_db(const fs::path &dbpath, sqlite3 **out) {
 }
 
 static std::vector<std::tuple<std::string, std::string, std::string, int, uint64_t, uint64_t>>
-find_matching_trips(sqlite3 *db,
+findMatchingTrips(sqlite3 *db,
                     const std::string &topic,
                     uint64_t start_ns,
                     uint64_t end_ns)
@@ -118,7 +123,7 @@ struct DataRef {
 // Build list of DataRef for the query window.
 // This only stores metadata, not image or lidar bytes.
 static std::vector<DataRef>
-collect_refs(const fs::path &ssd_root,
+collectRefs(const fs::path &ssd_root,
                    const std::string &topic,
                    uint64_t qstart_ns,
                    uint64_t qend_ns)
@@ -127,12 +132,12 @@ collect_refs(const fs::path &ssd_root,
 
   sqlite3 *db = nullptr;
   fs::path dbpath = fs::path(ssd_root) / "global.sqlite3";
-  if (!open_db(dbpath, &db)) {
+  if (!openDb(dbpath, &db)) {
     std::cerr << "Cannot open DB " << dbpath << "\n";
     return refs;
   }
 
-  auto trips = find_matching_trips(db, topic, qstart_ns, qend_ns);
+  auto trips = findMatchingTrips(db, topic, qstart_ns, qend_ns);
   if (trips.empty()) {
     sqlite3_close(db);
     std::cerr << "No matching trips for topic " << topic << " in window\n";
@@ -230,7 +235,7 @@ collect_refs(const fs::path &ssd_root,
 // -----------------------------------------------------------------------------
 
 // Single payload loader for both image and lidar
-static bool load_payload(const DataRef &ref,
+static bool loadPayload(const DataRef &ref,
                          std::vector<uint8_t> &out_payload)
 {
   out_payload.clear();
@@ -254,7 +259,7 @@ static bool load_payload(const DataRef &ref,
   return true;
 }
 
-static bool decode_laz_payload_to_cloud(const std::vector<uint8_t> &payload,
+static bool loadLazFromPayload(const std::vector<uint8_t> &payload,
                                         pcl::PointCloud<pcl::PointXYZI>::Ptr cloud)
 {
   cloud->clear();
@@ -327,11 +332,17 @@ static bool decode_laz_payload_to_cloud(const std::vector<uint8_t> &payload,
     cloud->push_back(pt);
   }
 
+  // finalize cloud layout
+  cloud->width  = static_cast<std::uint32_t>(cloud->size());
+  cloud->height = 1;
+  cloud->is_dense = true;
+
   if (laszip_close_reader(reader) != 0) {
     std::cerr << "laszip_close_reader failed\n";
     ok = false;
   }
   laszip_destroy(reader);
+
   return ok;
 }
 
@@ -339,7 +350,7 @@ static bool decode_laz_payload_to_cloud(const std::vector<uint8_t> &payload,
 // Viewer: one frame at a time, arrow keys navigate
 // -----------------------------------------------------------------------------
 
-static void view_images_interactive(const std::vector<DataRef> &refs)
+static void viewImagesInteractive(const std::vector<DataRef> &refs)
 {
   if (refs.empty()) {
     std::cout << "No matching images in requested window\n";
@@ -359,7 +370,7 @@ static void view_images_interactive(const std::vector<DataRef> &refs)
 
     // read this one image payload from SSD
     std::vector<uint8_t> payload;
-    if (!load_payload(ref, payload)) {
+    if (!loadPayload(ref, payload)) {
       std::cerr << "Skip index " << idx << " due to load error\n";
     } else {
       cv::Mat buf_mat(1, static_cast<int>(payload.size()), CV_8UC1);
@@ -402,111 +413,96 @@ static void view_images_interactive(const std::vector<DataRef> &refs)
 
 
 // Simple LiDAR viewer using OpenCV: project XY to 2D image
-static void view_lidar_interactive(const std::vector<DataRef> &refs)
+static void viewLidarInteractive(const std::vector<DataRef>& refs)
 {
   if (refs.empty()) {
     std::cout << "No matching LiDAR frames in requested window\n";
     return;
   }
 
-  std::cout << "Found " << refs.size()
-            << " LiDAR frames. Left/Right arrow or A/D to navigate, q to quit.\n";
+  // Force software GL and silence VTK spam (helps with driver / shader issues).
+  setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
+  setenv("VTK_SILENCE_DEPRECATION", "1", 1);
+#if defined(VTK_MAJOR_VERSION) && (VTK_MAJOR_VERSION >= 9)
+  vtkLogger::SetStderrVerbosity(vtkLogger::VERBOSITY_ERROR);
+#endif
+  vtkObject::GlobalWarningDisplayOff();
 
-  const std::string win_name = "AVS LiDAR Viewer";
-  cv::namedWindow(win_name, cv::WINDOW_NORMAL);
+  using CloudT = pcl::PointCloud<pcl::PointXYZI>;
+  pcl::visualization::PCLVisualizer::Ptr viewer(
+      new pcl::visualization::PCLVisualizer("LiDAR"));
 
-  std::size_t idx = 0;
-  pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>());
+  viewer->setBackgroundColor(0.0, 0.0, 0.0);
+  viewer->addCoordinateSystem(1.0);
 
-  const int img_w = 1024;
-  const int img_h = 512;
-
-  while (true) {
-    const auto &ref = refs[idx];
-
-    // load payload
-    std::vector<uint8_t> payload;
-    if (!load_payload(ref, payload)) {
-      std::cerr << "Skip frame " << idx << " due to load error\n";
-    } else if (!decode_laz_payload_to_cloud(payload, cloud)) {
-      std::cerr << "Skip frame " << idx << " due to decode error\n";
-    } else {
-      // find XY bounds
-      float min_x =  std::numeric_limits<float>::infinity();
-      float max_x = -std::numeric_limits<float>::infinity();
-      float min_y =  std::numeric_limits<float>::infinity();
-      float max_y = -std::numeric_limits<float>::infinity();
-
-      for (const auto &pt : cloud->points) {
-        if (!std::isfinite(pt.x) || !std::isfinite(pt.y)) continue;
-        if (pt.x < min_x) min_x = pt.x;
-        if (pt.x > max_x) max_x = pt.x;
-        if (pt.y < min_y) min_y = pt.y;
-        if (pt.y > max_y) max_y = pt.y;
-      }
-
-      if (!std::isfinite(min_x) || !std::isfinite(max_x) || min_x == max_x) {
-        min_x = -50.f; max_x = 50.f;
-      }
-      if (!std::isfinite(min_y) || !std::isfinite(max_y) || min_y == max_y) {
-        min_y = -50.f; max_y = 50.f;
-      }
-
-      const float range_x = max_x - min_x;
-      const float range_y = max_y - min_y;
-
-      cv::Mat canvas(img_h, img_w, CV_8UC3, cv::Scalar(0, 0, 0));
-
-      for (const auto &pt : cloud->points) {
-        if (!std::isfinite(pt.x) || !std::isfinite(pt.y)) continue;
-
-        int px = static_cast<int>((pt.x - min_x) / range_x * (img_w - 1));
-        int py = static_cast<int>((pt.y - min_y) / range_y * (img_h - 1));
-
-        py = img_h - 1 - py;
-
-        if (px < 0 || px >= img_w || py < 0 || py >= img_h) continue;
-
-        float inten = pt.intensity;
-        if (!std::isfinite(inten)) inten = 0.f;
-        if (inten < 0.f) inten = 0.f;
-        if (inten > 255.f) inten = 255.f;
-        unsigned char v = static_cast<unsigned char>(inten);
-
-        canvas.at<cv::Vec3b>(py, px) = cv::Vec3b(v, v, 255);  // bluish dot
-      }
-
-      std::string title = "LiDAR frame "
-                          + std::to_string(idx + 1) + "/" + std::to_string(refs.size())
-                          + " ts=" + std::to_string(ref.ts_ns);
-      cv::imshow(win_name, canvas);
-      cv::setWindowTitle(win_name, title);
-    }
-
-    // mask key: some OpenCV builds put extra bits in high byte(s)
-    int key_raw = cv::waitKey(0);
-    int key = key_raw & 0xFF;
-
-    bool go_prev = (key == 81 || key == 'a' || key == 'A');     // left or A
-    bool go_next = (key == 83 || key == 'd' || key == 'D');     // right or D
-
-    if (key == 'q' || key == 'Q' || key == 27) {
-      break;
-    } else if (go_next) {
-      if (idx + 1 < refs.size()) {
-        idx += 1;
-      }
-    } else if (go_prev) {
-      if (idx > 0) {
-        idx -= 1;
-      }
-    }
+  // Disable MSAA so VTK does not try to build the broken resolve shader.
+  if (auto rw = viewer->getRenderWindow()) {
+    rw->SetMultiSamples(0);
   }
 
-  cv::destroyWindow(win_name);
+  struct KeyState { char last = 0; } ks;
+
+  viewer->registerKeyboardCallback(
+      [](const pcl::visualization::KeyboardEvent& e, void* cookie) {
+        if (!e.keyDown()) return;
+        auto* state = static_cast<KeyState*>(cookie);
+        // Use the same behavior as the working viewClouds(): raw keyCode
+        state->last = static_cast<char>(e.getKeyCode());
+      },
+      static_cast<void*>(&ks));
+
+  CloudT::Ptr cloud(new CloudT);
+  int idx = 0;
+  const std::string kId = "cloud";
+
+  auto show = [&](int i) {
+    cloud->clear();
+
+    std::vector<uint8_t> payload;
+    if (!loadPayload(refs[static_cast<std::size_t>(i)], payload)) {
+      std::cerr << "Skip frame " << i << " (payload load failed)\n";
+      return;
+    }
+    if (!loadLazFromPayload(payload, cloud)) {
+      std::cerr << "Skip frame " << i << " (LAZ decode failed)\n";
+      return;
+    }
+    if (cloud->empty()) {
+      std::cerr << "Frame " << i << " decoded to empty cloud\n";
+      return;
+    }
+
+    CloudT::ConstPtr ccloud(cloud);
+    pcl::visualization::PointCloudColorHandlerGenericField<pcl::PointXYZI> intensity(
+        ccloud, "intensity");
+
+    if (!viewer->updatePointCloud<pcl::PointXYZI>(ccloud, intensity, kId)) {
+      viewer->addPointCloud<pcl::PointXYZI>(ccloud, intensity, kId);
+      viewer->setPointCloudRenderingProperties(
+          pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, kId);
+    }
+  };
+
+  // Show first frame
+  show(idx);
+
+  // Main loop: same key behavior as your working tool
+  while (!viewer->wasStopped()) {
+    viewer->spinOnce(50);
+
+    if (ks.last == 'd') {  // next
+      idx = (idx + 1) % static_cast<int>(refs.size());
+      show(idx);
+      ks.last = 0;
+    } else if (ks.last == 'a') {  // previous
+      idx = (idx - 1 + static_cast<int>(refs.size())) % static_cast<int>(refs.size());
+      show(idx);
+      ks.last = 0;
+    } else if (ks.last == 'q' || ks.last == 27) {  // q or ESC
+      break;
+    }
+  }
 }
-
-
 // -----------------------------------------------------------------------------
 // main
 // -----------------------------------------------------------------------------
@@ -566,12 +562,12 @@ int main(int argc, char **argv) {
 
   // Build refs once from append log
   std::vector<DataRef> refs =
-      collect_refs(ssd_root, topic, start_ns, end_ns);
+      collectRefs(ssd_root, topic, start_ns, end_ns);
 
   if (lidar_mode) {
-    view_lidar_interactive(refs);
+    viewLidarInteractive(refs);
   } else {  // image_mode
-    view_images_interactive(refs);
+    viewImagesInteractive(refs);
   }
 
   return 0;
