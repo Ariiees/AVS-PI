@@ -33,7 +33,7 @@ static const fs::path kSsdRoot("/home/avs/DATA/SSD");
 static void usage(const char *p) {
   std::cerr << "Usage: " << p
             << " --topic <sensor_topic> --start <ts_ns> --end <ts_ns> "
-               "[--image | --lidar]\n";
+               "[--image | --lidar | --gps]\n";
   std::exit(1);
 }
 
@@ -52,9 +52,9 @@ static bool openDb(const fs::path &dbpath, sqlite3 **out) {
 
 static std::vector<std::tuple<std::string, std::string, std::string, int, uint64_t, uint64_t>>
 findMatchingTrips(sqlite3 *db,
-                    const std::string &topic,
-                    uint64_t start_ns,
-                    uint64_t end_ns)
+                  const std::string &topic,
+                  uint64_t start_ns,
+                  uint64_t end_ns)
 {
   std::vector<std::tuple<std::string, std::string, std::string, int, uint64_t, uint64_t>> out;
 
@@ -124,9 +124,9 @@ struct DataRef {
 // This only stores metadata, not image or lidar bytes.
 static std::vector<DataRef>
 collectRefs(const fs::path &ssd_root,
-                   const std::string &topic,
-                   uint64_t qstart_ns,
-                   uint64_t qend_ns)
+            const std::string &topic,
+            uint64_t qstart_ns,
+            uint64_t qend_ns)
 {
   std::vector<DataRef> refs;
 
@@ -234,9 +234,9 @@ collectRefs(const fs::path &ssd_root,
 // Public API: load one record payload into memory
 // -----------------------------------------------------------------------------
 
-// Single payload loader for both image and lidar
+// Single payload loader for image, lidar and gps
 static bool loadPayload(const DataRef &ref,
-                         std::vector<uint8_t> &out_payload)
+                        std::vector<uint8_t> &out_payload)
 {
   out_payload.clear();
 
@@ -259,8 +259,12 @@ static bool loadPayload(const DataRef &ref,
   return true;
 }
 
+// -----------------------------------------------------------------------------
+// LiDAR payload decode
+// -----------------------------------------------------------------------------
+
 static bool loadLazFromPayload(const std::vector<uint8_t> &payload,
-                                        pcl::PointCloud<pcl::PointXYZI>::Ptr cloud)
+                               pcl::PointCloud<pcl::PointXYZI>::Ptr cloud)
 {
   cloud->clear();
   if (payload.empty()) {
@@ -347,7 +351,7 @@ static bool loadLazFromPayload(const std::vector<uint8_t> &payload,
 }
 
 // -----------------------------------------------------------------------------
-// Viewer: one frame at a time, arrow keys navigate
+// Viewer: images one frame at a time, arrow keys navigate
 // -----------------------------------------------------------------------------
 
 static void viewImagesInteractive(const std::vector<DataRef> &refs)
@@ -412,7 +416,7 @@ static void viewImagesInteractive(const std::vector<DataRef> &refs)
 }
 
 
-// Simple LiDAR viewer using OpenCV: project XY to 2D image
+// Simple LiDAR viewer
 static void viewLidarInteractive(const std::vector<DataRef>& refs)
 {
   if (refs.empty()) {
@@ -503,6 +507,106 @@ static void viewLidarInteractive(const std::vector<DataRef>& refs)
     }
   }
 }
+
+// -----------------------------------------------------------------------------
+// GPS viewer
+// -----------------------------------------------------------------------------
+
+struct GpsPayload {
+  double latitude;
+  double longitude;
+  double altitude;
+  double cov_xx;
+  double cov_yy;
+  double cov_zz;
+};
+
+static void viewGpsInteractive(const std::vector<DataRef>& refs)
+{
+  if (refs.empty()) {
+    std::cout << "No matching GPS records in requested window\n";
+    return;
+  }
+
+  std::cout << "Found " << refs.size()
+            << " GPS records. Use n for next, p for previous, q to quit.\n";
+
+  std::size_t idx = 0;
+  // flush any leftover newline
+  std::cin.clear();
+  std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+  while (true) {
+    const auto &ref = refs[idx];
+
+    std::vector<uint8_t> payload;
+    if (!loadPayload(ref, payload)) {
+      std::cerr << "Skip index " << idx << " due to load error\n";
+    } else if (payload.size() < sizeof(GpsPayload)) {
+      std::cerr << "Payload too small for GpsPayload at index " << idx << "\n";
+    } else {
+      GpsPayload gp{};
+      std::memcpy(&gp, payload.data(), sizeof(GpsPayload));
+
+            std::time_t t_sec = static_cast<std::time_t>(ref.ts_ns / 1000000000ULL);
+            std::tm tm_buf{};
+            char time_str[64];
+      #if defined(_MSC_VER)
+            // Windows: use gmtime_s(tm* tmBuf, const time_t* time)
+            if (gmtime_s(&tm_buf, &t_sec) == 0) {
+              std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S UTC", &tm_buf);
+            } else {
+              std::snprintf(time_str, sizeof(time_str), "ts_ns=%llu",
+                            static_cast<unsigned long long>(ref.ts_ns));
+            }
+      #else
+            // POSIX: use gmtime_r(const time_t* time, tm* tmBuf)
+            if (gmtime_r(&t_sec, &tm_buf)) {
+              std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S UTC", &tm_buf);
+            } else {
+              std::snprintf(time_str, sizeof(time_str), "ts_ns=%llu",
+                            static_cast<unsigned long long>(ref.ts_ns));
+            }
+      #endif
+
+      std::cout << "\n[" << idx + 1 << "/" << refs.size() << "] "
+                << "topic=" << ref.sensor_topic
+                << " day=" << ref.day
+                << " trip=" << ref.trip_id
+                << " ts_ns=" << ref.ts_ns
+                << " (" << time_str << ")\n";
+
+      std::cout << "  latitude   : " << gp.latitude  << "\n"
+                << "  longitude  : " << gp.longitude << "\n"
+                << "  altitude   : " << gp.altitude  << "\n"
+                << "  cov_xx     : " << gp.cov_xx    << "\n"
+                << "  cov_yy     : " << gp.cov_yy    << "\n"
+                << "  cov_zz     : " << gp.cov_zz    << "\n";
+    }
+
+    std::cout << "\nCommand [n=next, p=prev, q=quit] > ";
+    std::string line;
+    if (!std::getline(std::cin, line)) {
+      break;
+    }
+    if (line.empty()) {
+      continue;
+    }
+    char cmd = line[0];
+    if (cmd == 'q' || cmd == 'Q') {
+      break;
+    } else if (cmd == 'n' || cmd == 'N') {
+      if (idx + 1 < refs.size()) {
+        idx += 1;
+      }
+    } else if (cmd == 'p' || cmd == 'P') {
+      if (idx > 0) {
+        idx -= 1;
+      }
+    }
+  }
+}
+
 // -----------------------------------------------------------------------------
 // main
 // -----------------------------------------------------------------------------
@@ -514,6 +618,7 @@ int main(int argc, char **argv) {
   uint64_t end_ns   = 0;
   bool image_mode   = false;
   bool lidar_mode   = false;
+  bool gps_mode     = false;
 
   if (argc < 7) {  // need at least topic, start, end
     usage(argv[0]);
@@ -541,6 +646,10 @@ int main(int argc, char **argv) {
       lidar_mode = true;
       continue;
     }
+    if (a == "--gps") {
+      gps_mode = true;
+      continue;
+    }
     // unknown arg
     usage(argv[0]);
   }
@@ -550,13 +659,16 @@ int main(int argc, char **argv) {
   }
 
   // prevent conflicting tags
-  if (image_mode && lidar_mode) {
-    std::cerr << "Cannot use --image and --lidar together\n";
+  int mode_count = (image_mode ? 1 : 0) +
+                   (lidar_mode ? 1 : 0) +
+                   (gps_mode   ? 1 : 0);
+  if (mode_count > 1) {
+    std::cerr << "Cannot combine --image, --lidar, or --gps\n";
     usage(argv[0]);
   }
 
-  // default to image if neither tag is given
-  if (!image_mode && !lidar_mode) {
+  // default to image if no mode tag is given
+  if (!image_mode && !lidar_mode && !gps_mode) {
     image_mode = true;
   }
 
@@ -566,6 +678,8 @@ int main(int argc, char **argv) {
 
   if (lidar_mode) {
     viewLidarInteractive(refs);
+  } else if (gps_mode) {
+    viewGpsInteractive(refs);
   } else {  // image_mode
     viewImagesInteractive(refs);
   }
