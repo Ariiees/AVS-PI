@@ -13,6 +13,7 @@ public:
 
   void saveAsBin(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud, const std::string &filename);
   void saveAsLAZ(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud, const std::string &filename);
+  void getLAZ(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud, std::vector<uint8_t> &out_bytes);
 
 private:
   std::string output_dir_;

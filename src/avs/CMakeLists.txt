@@ -287,26 +287,47 @@ ament_target_dependencies(image_subscriber_append
   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
 )
 
-# ========== Image Append Retrieve Test ==========
+# ========== Lidar Append Test ==========
+add_executable(lidar_subscriber_append
+  src/subscriber/lidar_subscriber_append.cpp
+  src/process/lidar_compress.cpp
+  src/process/lidar_downsample.cpp
+  src/logger/append_logger.cpp
+  src/logger/topic_map.cpp
+  src/logger/trip_manager.cpp
+
+)
+
+target_link_libraries(lidar_subscriber_append
+  ${PCL_LIBRARIES}
+  ${PCL_IO_LIBRARIES}
+  ${LASZIP_LIBRARY}
+  ${SQLITE3_LIBRARIES}
+  yaml-cpp
+)
+
+ament_target_dependencies(lidar_subscriber_append
+  rclcpp sensor_msgs pcl_conversions yaml-cpp
+)
+
+# ========== Append Retrieve Test ==========
 add_executable(avs_retrieve_view
   src/retrieve/retrieve_append_cli.cpp
   src/logger/append_logger.cpp
 )
 
 target_link_libraries(avs_retrieve_view
+  ${PCL_LIBRARIES}
+  ${PCL_IO_LIBRARIES}
+  ${LASZIP_LIBRARY}
   ${OpenCV_LIBS}
   ${SQLITE3_LIBRARIES}
   yaml-cpp
 )
 
-ament_target_dependencies(image_subscriber_append
-  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
+ament_target_dependencies(avs_retrieve_view
+  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp pcl_conversions
 )
-
-install(TARGETS avs_retrieve_view
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 
 
 # ========== Install Targets ==========
@@ -314,11 +335,13 @@ install(TARGETS
   image_subscriber
   image_subscriber_append
   lidar_subscriber
+  lidar_subscriber_append
   gps_subscriber
   fs_img_write
   fs_lidar_write
   db_benchmark
   retrieve_cli
+  avs_retrieve_view
   archive_move
   image_sub_bench
   lidar_sub_bench

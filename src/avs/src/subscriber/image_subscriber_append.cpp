@@ -70,11 +70,10 @@ public:
       std::bind(&ImgProcessNode::imageCallback, this, _1));
     
     latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
-    
-    std::string trip_id_str = std::to_string(trip_id);
+
     RCLCPP_INFO(this->get_logger(),
                 "AVS Image node started. Subscribed to %s; writing to append-logger (path=%s trip=%s)",
-                image_topic_.c_str(), image_path_.c_str(), trip_id_str.c_str());
+                image_topic_.c_str(), image_path_.c_str(), std::to_string(trip_id).c_str());
   }
 
   ~ImgProcessNode() override

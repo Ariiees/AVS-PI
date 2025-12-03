@@ -59,4 +59,40 @@ void LidarCompressor::saveAsLAZ(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr&
   laszip_destroy(writer);
 }
 
+void LidarCompressor::getLAZ(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr& cloud, std::vector<uint8_t> &out_bytes)
+{
+  out_bytes.clear();
+
+  std::ostringstream oss(std::ios::binary);
+
+  laszip_POINTER writer;
+  laszip_create(&writer);
+
+  laszip_header* header;
+  laszip_get_header_pointer(writer, &header);
+  header->point_data_format = 3;
+  header->point_data_record_length = 34;
+  header->number_of_point_records = static_cast<laszip_U32>(cloud->size());
+
+  laszip_point* point;
+  laszip_get_point_pointer(writer, &point);
+
+  laszip_open_writer_stream(writer, oss, 1, 0);
+
+  for (const auto& pt : cloud->points) {
+    point->X = static_cast<laszip_I32>(pt.x * 1000);
+    point->Y = static_cast<laszip_I32>(pt.y * 1000);
+    point->Z = static_cast<laszip_I32>(pt.z * 1000);
+    point->intensity = static_cast<laszip_U16>(pt.intensity);
+    laszip_write_point(writer);
+    laszip_update_inventory(writer);
+  }
+
+  laszip_close_writer(writer);
+  laszip_destroy(writer);
+
+  const std::string laz_str = oss.str();
+  out_bytes.assign(laz_str.begin(), laz_str.end());
+}
+
 }  // namespace avs
