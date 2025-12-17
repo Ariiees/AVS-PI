@@ -54,10 +54,10 @@ public:
     
     downsampler_ = std::make_shared<LidarDownsampler>(config_path);
     compressor_ = std::make_shared<LidarCompressor>(lidar_path_);
-    trip_mgr_     = std::make_shared<TripManager>(ssd_root);
+    trip_mgr_     = std::make_shared<TripManager>();
     append_logger_ = std::make_shared<avs::AppendLogger>(ssd_root, lidar_topic_);
 
-    int trip_id = trip_mgr_->GetTripId(current_day);
+    int trip_id = trip_mgr_->GetTripId(lidar_path_);
     const uint64_t trip_strat_ns = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
@@ -127,7 +127,7 @@ private:
     rclcpp::QoS qos = rclcpp::SensorDataQoS();  // BestEffort, small depth
     qos.durability(rclcpp::DurabilityPolicy::Volatile);
 
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 50; ++i) {
       auto infos = this->get_publishers_info_by_topic(topic);
       if (!infos.empty()) {
         auto offered = infos.front().qos_profile();

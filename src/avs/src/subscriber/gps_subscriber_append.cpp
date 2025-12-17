@@ -33,15 +33,18 @@ public:
 
     YAML::Node root   = YAML::LoadFile(config_path);
     YAML::Node common = root["common"];
+    YAML::Node gps_downscale = root["gps_downscale"];
 
     gps_topic_   = common["gps_topic"].as<std::string>();
     std::string ssd_root = common["ssd_root"].as<std::string>();
+    downscale_ = gps_downscale["open"].as<bool>(false);
+    downscale_frequency_ = gps_downscale["frequency"].as<int>(50);
 
     std::string folder_name =
       avs::GetTopicFolder(avs::LoadTopicMap(topic_map_path), gps_topic_);
     std::string current_day = avs::getCurrentDayFolder();
 
-    // gps_ssd_dir_ is expected to look like /path/to/SSD_ROOT/gps_folder
+    
     gps_path_ = (fs::path(ssd_root) / fs::path(folder_name) / fs::path(current_day)).string();
 
     if (!avs::ensureDirectory(gps_path_, &ec)) {
@@ -53,10 +56,10 @@ public:
         ec.message().c_str());
     }
 
-    trip_mgr_     = std::make_shared<TripManager>(ssd_root);
+    trip_mgr_     = std::make_shared<TripManager>();
     append_logger_ = std::make_shared<avs::AppendLogger>(ssd_root, gps_topic_);
 
-    int trip_id = trip_mgr_->GetTripId(current_day);
+    int trip_id = trip_mgr_->GetTripId(gps_path_);
 
     const uint64_t trip_start_ns = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -91,6 +94,15 @@ private:
     // const uint64_t ts_ns =
     //   static_cast<uint64_t>(msg->header.stamp.sec) * 1000000000ULL
     //   + static_cast<uint64_t>(msg->header.stamp.nanosec);
+    if (downscale_) {
+      records_count_++;
+      if (records_count_ % downscale_frequency_ != 0) {
+        return;
+      }
+    }
+    
+    records_count_ = 0;
+
     uint64_t ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                        std::chrono::system_clock::now().time_since_epoch()
                      ).count();
@@ -122,7 +134,7 @@ private:
     rclcpp::QoS qos = rclcpp::SensorDataQoS();  // BestEffort, small depth
     qos.durability(rclcpp::DurabilityPolicy::Volatile);
 
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 50; ++i) {
       auto infos = this->get_publishers_info_by_topic(topic);
       if (!infos.empty()) {
         auto offered = infos.front().qos_profile();
@@ -158,6 +170,9 @@ private:
 
   std::string gps_topic_;
   std::string gps_path_;
+  bool downscale_;
+  int downscale_frequency_; // hz
+  int records_count_ = 0;
 
   std::error_code ec;
 

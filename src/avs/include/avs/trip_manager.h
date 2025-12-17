@@ -8,19 +8,21 @@ namespace avs {
 
 class TripManager {
 public:
-  explicit TripManager(const std::string& ssd_root);
+  TripManager() = default;
 
-  // day format: "YYYY-MM-DD"
-  int GetTripId(const std::string& day);
+  // day_path is the exact directory SSD topic day
+  // returns next trip id based on how many trip log files exist
+  int GetTripId(const std::string& day_path);
 
-  static std::string FormatTripId(int trip_id);
+  // 0 becomes 00, 1 becomes 01
+  static std::string FormatTripId2(int trip_id);
 
 private:
-  std::string ssd_root_;
-  std::unordered_map<std::string, int> day_next_trip_id_;
-  std::mutex mutex_;
+  static int CountTripLogs(const std::string& day_path);
 
-  int ScanExistingTrips(const std::string& day);
+private:
+  std::mutex mutex_;
+  std::unordered_map<std::string, int> cached_next_id_;
 };
 
 }  // namespace avs

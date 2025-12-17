@@ -54,10 +54,10 @@ public:
     }
 
     deduplicator_ = std::make_shared<ImgDeduplicator>(image_path_, config_path);
-    trip_mgr_     = std::make_shared<TripManager>(ssd_root);
+    trip_mgr_     = std::make_shared<TripManager>();
     append_logger_ = std::make_shared<avs::AppendLogger>(ssd_root, image_topic_);
 
-    int trip_id = trip_mgr_->GetTripId(current_day);
+    int trip_id = trip_mgr_->GetTripId(image_path_);
 
     const uint64_t trip_start_ns = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -131,7 +131,7 @@ private:
     rclcpp::QoS qos = rclcpp::SensorDataQoS();  // BestEffort, small depth
     qos.durability(rclcpp::DurabilityPolicy::Volatile);
 
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 50; ++i) {
       auto infos = this->get_publishers_info_by_topic(topic);
       if (!infos.empty()) {
         auto offered = infos.front().qos_profile();
