@@ -49,6 +49,7 @@ void AppendLogger::ensureGlobalSchema()
     "  topic_folder TEXT NOT NULL,"
     "  day TEXT NOT NULL,"
     "  trip_id INTEGER NOT NULL,"
+    "  number_of_records INTEGER NOT NULL,"
     "  start_ts_ns TEXT NOT NULL,"
     "  end_ts_ns TEXT NOT NULL,"
     "  PRIMARY KEY(sensor_topic, day, trip_id)"
@@ -62,20 +63,30 @@ void AppendLogger::ensureGlobalSchema()
   }
 }
 
-void AppendLogger::insertGlobalRow(const std::string &topic_folder, const std::string &day, int trip_id, uint64_t start_ts_ns)
+void AppendLogger::insertGlobalRow(
+  const std::string &topic_folder,
+  const std::string &day,
+  int trip_id,
+  uint64_t start_ts_ns)
 {
-  const char *sql = "INSERT OR REPLACE INTO global(sensor_topic, topic_folder, day, trip_id, start_ts_ns, end_ts_ns) VALUES(?, ?, ?, ?, ?, ?);";
+  const char *sql =
+    "INSERT OR REPLACE INTO global("
+    "sensor_topic, topic_folder, day, trip_id, number_of_records, start_ts_ns, end_ts_ns"
+    ") VALUES(?, ?, ?, ?, ?, ?, ?);";
+
   sqlite3_stmt *stmt = nullptr;
   int rc = sqlite3_prepare_v2(ssd_db_, sql, -1, &stmt, nullptr);
   if (rc != SQLITE_OK) {
     throw std::runtime_error("sqlite3_prepare_v2 failed (insert)");
   }
+
   sqlite3_bind_text(stmt, 1, topic_.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 2, topic_folder.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 3, day.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int(stmt, 4, trip_id);
-  sqlite3_bind_text(stmt, 5, std::to_string(start_ts_ns).c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 6, "0", -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64(stmt, 5, 0); // number_of_records initially 0
+  sqlite3_bind_text(stmt, 6, std::to_string(start_ts_ns).c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 7, "0", -1, SQLITE_TRANSIENT);
 
   rc = sqlite3_step(stmt);
   if (rc != SQLITE_DONE) {
@@ -85,16 +96,26 @@ void AppendLogger::insertGlobalRow(const std::string &topic_folder, const std::s
   sqlite3_finalize(stmt);
 }
 
-void AppendLogger::updateGlobalRowEnd(const std::string &day, int trip_id, uint64_t end_ts_ns)
+void AppendLogger::updateGlobalRowEnd(
+  const std::string &day,
+  int trip_id,
+  uint64_t end_ts_ns,
+  uint64_t number_of_records)
 {
-  const char *sql = "UPDATE global SET end_ts_ns = ? WHERE sensor_topic = ? AND day = ? AND trip_id = ?;";
+  const char *sql =
+    "UPDATE global "
+    "SET end_ts_ns = ?, number_of_records = ? "
+    "WHERE sensor_topic = ? AND day = ? AND trip_id = ?;";
+
   sqlite3_stmt *stmt = nullptr;
   int rc = sqlite3_prepare_v2(ssd_db_, sql, -1, &stmt, nullptr);
   if (rc != SQLITE_OK) throw std::runtime_error("sqlite3_prepare_v2 failed (update)");
+
   sqlite3_bind_text(stmt, 1, std::to_string(end_ts_ns).c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 2, topic_.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 3, day.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 4, trip_id);
+  sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(number_of_records));
+  sqlite3_bind_text(stmt, 3, topic_.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 4, day.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 5, trip_id);
 
   rc = sqlite3_step(stmt);
   if (rc != SQLITE_DONE) {
@@ -138,6 +159,7 @@ void AppendLogger::startTrip(const std::string &day, const std::string &topic_fo
   chunk_end_ts_ns_ = 0;
   chunk_record_count_ = 0;
   trip_index_.clear();
+  trip_total_record_count_ = 0;
 }
 
 void AppendLogger::openTripFiles()
@@ -213,8 +235,9 @@ void AppendLogger::flushChunkLocked()
   ch.chunk_size_bytes = static_cast<uint32_t>(chunk_buf_.size());
 
   trip_log_.write(reinterpret_cast<const char*>(&ch), sizeof(ch));
-  if (!chunk_buf_.empty())
+  if (!chunk_buf_.empty()) {
     trip_log_.write(reinterpret_cast<const char*>(chunk_buf_.data()), chunk_buf_.size());
+  }
   trip_log_.flush();
 
   TripIndexEntry tie;
@@ -229,6 +252,8 @@ void AppendLogger::flushChunkLocked()
   trip_idx_.write(reinterpret_cast<const char*>(&tie), sizeof(tie));
   trip_idx_.flush();
 
+  trip_total_record_count_ += static_cast<uint64_t>(ch.record_count);
+
   chunk_buf_.clear();
   chunk_record_count_ = 0;
   chunk_start_ts_ns_ = 0;
@@ -242,13 +267,13 @@ void AppendLogger::endTrip(uint64_t end_ts_ns)
 
   flushChunkLocked();
 
-  updateGlobalRowEnd(day_, trip_id_, end_ts_ns);
+  updateGlobalRowEnd(day_, trip_id_, end_ts_ns, trip_total_record_count_);
 
   closeTripFiles();
   trip_id_ = -1;
   day_.clear();
   trip_index_.clear();
+  trip_total_record_count_ = 0;
 }
 
 } // namespace avs
-// ...existing code...

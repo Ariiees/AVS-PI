@@ -1,4 +1,3 @@
-// ...existing code...
 #pragma once
 
 #include <cstdint>
@@ -52,19 +51,20 @@ public:
   // End a trip: flush pending chunk, update global end_ts_ns, close files.
   void endTrip(uint64_t end_ts_ns);
 
-  // optional tuning
+  // optional tuning for chunk size
   void setChunkTargetBytes(size_t bytes) { chunk_target_bytes_ = bytes; }
   void setChunkTargetNs(uint64_t ns) { chunk_target_ns_ = ns; }
 
 private:
   void openGlobalDB();
   void ensureGlobalSchema();
+
   void insertGlobalRow(const std::string &topic_folder, const std::string &day, int trip_id, uint64_t start_ts_ns);
-  void updateGlobalRowEnd(const std::string &day, int trip_id, uint64_t end_ts_ns);
+  void updateGlobalRowEnd(const std::string &day, int trip_id, uint64_t end_ts_ns, uint64_t number_of_records);
 
   void openTripFiles();
   void closeTripFiles();
-  void flushChunkLocked(); // requires mu_ locked
+  void flushChunkLocked();
 
   std::string ssd_root_;
   std::string topic_;
@@ -83,6 +83,8 @@ private:
   uint32_t chunk_record_count_ = 0;
 
   std::vector<TripIndexEntry> trip_index_;
+  uint64_t trip_total_record_count_ = 0;
+
   std::mutex mu_;
 
   size_t chunk_target_bytes_ = 256 * 1024;
@@ -90,4 +92,3 @@ private:
 };
 
 } // namespace avs
-// ...existing code...

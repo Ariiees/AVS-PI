@@ -1,13 +1,13 @@
 common:
-  img_ssd_dir: /home/avs/DATA/SSD/images
-  lidar_ssd_dir: /home/avs/DATA/SSD/lidar
-  gps_ssd_dir: /home/avs/DATA/SSD/gps
-  img_hdd_dir: /home/avs/DATA/HDD/images
-  lidar_hdd_dir: /home/avs/DATA/HDD/lidar
-  gps_hdd_dir: /home/avs/DATA/HDD/gps
+#   img_ssd_dir: /home/avs/DATA/SSD/images
+#   lidar_ssd_dir: /home/avs/DATA/SSD/lidar
+#   gps_ssd_dir: /home/avs/DATA/SSD/gps
+#   img_hdd_dir: /home/avs/DATA/HDD/images
+#   lidar_hdd_dir: /home/avs/DATA/HDD/lidar
+#   gps_hdd_dir: /home/avs/DATA/HDD/gps
   
-  hot_db_dir:  /home/avs/DATA/SSD/db
-  cold_db_dir: /home/avs/DATA/HDD/db
+  # hot_db_dir:  /home/avs/DATA/SSD/db
+  # cold_db_dir: /home/avs/DATA/HDD/db
 
   img_topic: /my_camera/pylon_ros2_camera_node/image_raw  #/camera/image for KITTI
   lidar_topic:  /sensing/lidar/top/pointcloud      #/lidar/pointcloud for KITTI
@@ -30,3 +30,7 @@ lidar_downsample:  # Downsample raw lidar point cloud with voxel grid filter
 
 lidar_compress:
   lidar_format: laz
+
+gps_downscale:
+  open: true
+  frequency: 50 # hz downscale to 1/frequency

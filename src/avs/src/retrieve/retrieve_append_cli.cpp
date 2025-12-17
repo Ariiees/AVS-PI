@@ -551,15 +551,6 @@ static void viewGpsInteractive(const std::vector<DataRef>& refs)
             std::time_t t_sec = static_cast<std::time_t>(ref.ts_ns / 1000000000ULL);
             std::tm tm_buf{};
             char time_str[64];
-      #if defined(_MSC_VER)
-            // Windows: use gmtime_s(tm* tmBuf, const time_t* time)
-            if (gmtime_s(&tm_buf, &t_sec) == 0) {
-              std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S UTC", &tm_buf);
-            } else {
-              std::snprintf(time_str, sizeof(time_str), "ts_ns=%llu",
-                            static_cast<unsigned long long>(ref.ts_ns));
-            }
-      #else
             // POSIX: use gmtime_r(const time_t* time, tm* tmBuf)
             if (gmtime_r(&t_sec, &tm_buf)) {
               std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S UTC", &tm_buf);
@@ -567,7 +558,6 @@ static void viewGpsInteractive(const std::vector<DataRef>& refs)
               std::snprintf(time_str, sizeof(time_str), "ts_ns=%llu",
                             static_cast<unsigned long long>(ref.ts_ns));
             }
-      #endif
 
       std::cout << "\n[" << idx + 1 << "/" << refs.size() << "] "
                 << "topic=" << ref.sensor_topic

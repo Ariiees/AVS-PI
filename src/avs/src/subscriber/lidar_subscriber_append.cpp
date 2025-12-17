@@ -77,6 +77,7 @@ public:
 
   ~LidarProcessNode() override
   {
+    subscription_.reset(); 
     uint64_t trip_end_ns = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
@@ -123,9 +124,7 @@ private:
   {
     using rclcpp::ReliabilityPolicy;
 
-    // Fallback: KEEP_LAST(10), RELIABLE, VOLATILE
-    rclcpp::QoS qos(10);
-    qos.reliability(ReliabilityPolicy::Reliable);
+    rclcpp::QoS qos = rclcpp::SensorDataQoS();  // BestEffort, small depth
     qos.durability(rclcpp::DurabilityPolicy::Volatile);
 
     for (int i = 0; i < 20; ++i) {
@@ -148,7 +147,7 @@ private:
     }
 
     RCLCPP_WARN(this->get_logger(),
-                "No publisher QoS detected on %s; using fallback QoS(KEEP_LAST depth=10, RELIABLE, VOLATILE)",
+                "No publisher QoS detected on %s; using fallback QoS(KEEP_LAST depth=10, BestEffort, VOLATILE)",
                 topic.c_str());
     return qos;
   }
