@@ -188,33 +188,13 @@ target_link_libraries(db_benchmark
   dl
 )
 
-# ========== Retrieve Visualization CLI ==========
-add_executable(retrieve_cli
-  src/retrieve/retrieve_cli.cpp
-  src/retrieve/retrieve_api.cpp
-  src/db/db_operation.cpp
+# ========== Archive Move Manager ==========s
+add_executable(archive
+  src/archive/archive.cpp
+  src/logger/topic_map.cpp
 )
 
-target_link_libraries(retrieve_cli
-  ${OpenCV_LIBS}
-  ${PCL_LIBRARIES}
-  ${PCL_IO_LIBRARIES}
-  ${LASZIP_LIBRARY}
-  ${SQLITE3_LIBRARIES}
-  ${VTK_LIBRARIES}
-)
-
-# PCL needs these sometimes
-add_definitions(${PCL_DEFINITIONS})
-
-# ========== Archive Move Manager ==========
-add_executable(archive_move
-  src/archive/move_manager.cpp
-  src/db/db_operation.cpp
-)
-
-target_link_libraries(archive_move
-  ${LIBARCHIVE_LIBRARIES}
+target_link_libraries(archive
   ${SQLITE3_LIBRARIES}
   yaml-cpp
   OpenSSL::Crypto
@@ -252,7 +232,6 @@ target_link_libraries(lidar_sub_bench
 ament_target_dependencies(lidar_sub_bench
   rclcpp sensor_msgs pcl_conversions yaml-cpp
 )
-
 
 
 add_executable(gps_sub_bench 
@@ -329,9 +308,9 @@ ament_target_dependencies(gps_subscriber_append
 ) 
 
 
-# ========== Append Retrieve Test ==========
+# ========== Retrieve View ==========
 add_executable(avs_retrieve_view
-  src/retrieve/retrieve_append_cli.cpp
+  src/retrieve/retrieve_cli.cpp
   src/logger/append_logger.cpp
 )
 
@@ -360,9 +339,8 @@ install(TARGETS
   fs_img_write
   fs_lidar_write
   db_benchmark
-  retrieve_cli
   avs_retrieve_view
-  archive_move
+  archive
   image_sub_bench
   lidar_sub_bench
   gps_sub_bench
