@@ -63,81 +63,6 @@ include_directories(
   ${LIBARCHIVE_INCLUDE_DIRS}
 )
 
-# --- add the append logger library (new) ---
-# add_library(avs_append_logger
-#   src/logger/append_logger.cpp
-# )
-
-# target_include_directories(avs_append_logger PUBLIC
-#   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-#   ${SQLITE3_INCLUDE_DIRS}
-# )
-
-# target_link_libraries(avs_append_logger PUBLIC
-#   ${SQLITE3_LIBRARIES}
-#   ${LIBARCHIVE_LIBRARIES}
-#   Threads::Threads
-#   dl
-# )
-
-# ament_target_dependencies(avs_append_logger
-#   rclcpp
-# )
-
-# ========== Image Reduction and Save ==========
-add_executable(image_subscriber
-  src/subscriber/image_subscriber.cpp
-  src/process/img_dedup.cpp
-  src/process/img_compress.cpp
-  src/db/db_operation.cpp
-)
-
-target_link_libraries(image_subscriber
-  ${OpenCV_LIBS}
-  ${SQLITE3_LIBRARIES}
-  yaml-cpp
-)
-
-ament_target_dependencies(image_subscriber
-  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
-)
-
-# ========== LiDAR Reduction and Save ==========
-add_executable(lidar_subscriber
-  src/subscriber/lidar_subscriber.cpp
-  src/process/lidar_downsample.cpp
-  src/process/lidar_compress.cpp
-  src/db/db_operation.cpp
-)
-
-target_link_libraries(lidar_subscriber
-  ${PCL_LIBRARIES}
-  ${PCL_IO_LIBRARIES}
-  ${LASZIP_LIBRARY}
-  ${SQLITE3_LIBRARIES}
-  yaml-cpp
-)
-
-ament_target_dependencies(lidar_subscriber
-  rclcpp sensor_msgs pcl_conversions yaml-cpp
-)
-
-# ========== GPS Subscriber ==========
-
-add_executable(gps_subscriber 
-  src/subscriber/gps_subscriber.cpp
-)
-
-target_link_libraries(gps_subscriber 
-   ${SQLITE3_LIBRARIES}
-   yaml-cpp
-)
-
-ament_target_dependencies(gps_subscriber 
-  rclcpp gps_msgs yaml-cpp
-) 
-
-
 # ========== File System Benchmark Image Write ==========
 add_executable(fs_img_write
   src/benchmark/img_write_fs_benchmark.cpp
@@ -200,55 +125,9 @@ target_link_libraries(archive
   OpenSSL::Crypto
 )
 
-# ========== Prototype Ingest Profile ==========
-add_executable(image_sub_bench
-  src/subscriber/image_sub_bench.cpp
-  src/process/img_dedup.cpp
-  src/process/img_compress.cpp
-  src/db/db_operation.cpp
-)
-target_link_libraries(image_sub_bench
-  ${OpenCV_LIBS}
-  ${SQLITE3_LIBRARIES}
-  yaml-cpp
-)
-ament_target_dependencies(image_sub_bench
-  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
-)
-
-add_executable(lidar_sub_bench
-  src/subscriber/lidar_sub_bench.cpp
-  src/process/lidar_downsample.cpp
-  src/process/lidar_compress.cpp
-  src/db/db_operation.cpp
-)
-target_link_libraries(lidar_sub_bench
-  ${PCL_LIBRARIES}
-  ${PCL_IO_LIBRARIES}
-  ${LASZIP_LIBRARY}
-  ${SQLITE3_LIBRARIES}
-  yaml-cpp
-)
-ament_target_dependencies(lidar_sub_bench
-  rclcpp sensor_msgs pcl_conversions yaml-cpp
-)
-
-
-add_executable(gps_sub_bench 
-  src/subscriber/gps_sub_bench.cpp
-)
-target_link_libraries(gps_sub_bench 
-   ${SQLITE3_LIBRARIES}
-   yaml-cpp
-)
-ament_target_dependencies(gps_sub_bench 
-  rclcpp gps_msgs yaml-cpp
-) 
-
-
-# ========== Image Append Test ==========
-add_executable(image_subscriber_append
-  src/subscriber/image_subscriber_append.cpp
+# ========== Image Reduct and Store ==========
+add_executable(image_subscriber
+  src/subscriber/image_subscriber.cpp
   src/process/img_dedup.cpp
   src/logger/append_logger.cpp
   src/logger/topic_map.cpp
@@ -256,19 +135,19 @@ add_executable(image_subscriber_append
 
 )
 
-target_link_libraries(image_subscriber_append
+target_link_libraries(image_subscriber
   ${OpenCV_LIBS}
   ${SQLITE3_LIBRARIES}
   yaml-cpp
 )
 
-ament_target_dependencies(image_subscriber_append
+ament_target_dependencies(image_subscriber
   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
 )
 
-# ========== Lidar Append Test ==========
-add_executable(lidar_subscriber_append
-  src/subscriber/lidar_subscriber_append.cpp
+# ========== Lidar Downsample and Store ==========
+add_executable(lidar_subscriber
+  src/subscriber/lidar_subscriber.cpp
   src/process/lidar_compress.cpp
   src/process/lidar_downsample.cpp
   src/logger/append_logger.cpp
@@ -277,7 +156,7 @@ add_executable(lidar_subscriber_append
 
 )
 
-target_link_libraries(lidar_subscriber_append
+target_link_libraries(lidar_subscriber
   ${PCL_LIBRARIES}
   ${PCL_IO_LIBRARIES}
   ${LASZIP_LIBRARY}
@@ -285,25 +164,25 @@ target_link_libraries(lidar_subscriber_append
   yaml-cpp
 )
 
-ament_target_dependencies(lidar_subscriber_append
+ament_target_dependencies(lidar_subscriber
   rclcpp sensor_msgs pcl_conversions yaml-cpp
 )
 
-# ========== GPS Append Test ==========
+# ========== GPS Reduced and Store ==========
 
-add_executable(gps_subscriber_append 
-  src/subscriber/gps_subscriber_append.cpp
+add_executable(gps_subscriber
+  src/subscriber/gps_subscriber.cpp
   src/logger/append_logger.cpp
   src/logger/topic_map.cpp
   src/logger/trip_manager.cpp 
 )
 
-target_link_libraries(gps_subscriber_append 
+target_link_libraries(gps_subscriber 
    ${SQLITE3_LIBRARIES}
    yaml-cpp
 )
 
-ament_target_dependencies(gps_subscriber_append 
+ament_target_dependencies(gps_subscriber 
   rclcpp gps_msgs yaml-cpp
 ) 
 
@@ -331,19 +210,10 @@ ament_target_dependencies(avs_retrieve_view
 # ========== Install Targets ==========
 install(TARGETS
   image_subscriber
-  image_subscriber_append
   lidar_subscriber
-  lidar_subscriber_append
   gps_subscriber
-  gps_subscriber_append
-  fs_img_write
-  fs_lidar_write
-  db_benchmark
   avs_retrieve_view
   archive
-  image_sub_bench
-  lidar_sub_bench
-  gps_sub_bench
   DESTINATION lib/${PROJECT_NAME}
 )
 

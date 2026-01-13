@@ -5,8 +5,6 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
-#include "avs/db_operation.h"  // AvsDb, AvsRow
-
 namespace avs {
 
 // One row from AVS joined with a resolved absolute path and a simple kind tag.
@@ -48,7 +46,6 @@ public:
   bool loadLazPath(const std::string& path, pcl::PointCloud<pcl::PointXYZI>::Ptr out_cloud);
 
 private:
-  AvsDb db_;
   bool is_open_{false};
   std::string root_dir_;  // may be empty; used to resolve relative DB paths
   std::string err_;
