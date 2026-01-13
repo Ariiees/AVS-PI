@@ -188,12 +188,12 @@ ament_target_dependencies(gps_subscriber
 
 
 # ========== Retrieve View ==========
-add_executable(avs_retrieve_view
+add_executable(retrieve_view
   src/retrieve/retrieve_cli.cpp
-  src/logger/append_logger.cpp
+  src/retrieve/retrieve_api.cpp
 )
 
-target_link_libraries(avs_retrieve_view
+target_link_libraries(retrieve_view
   ${OpenCV_LIBS}
   ${PCL_LIBRARIES}
   ${PCL_IO_LIBRARIES}
@@ -202,7 +202,7 @@ target_link_libraries(avs_retrieve_view
   ${VTK_LIBRARIES}
 )
 
-ament_target_dependencies(avs_retrieve_view
+ament_target_dependencies(retrieve_view
   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp pcl_conversions
 )
 
@@ -212,7 +212,7 @@ install(TARGETS
   image_subscriber
   lidar_subscriber
   gps_subscriber
-  avs_retrieve_view
+  retrieve_view
   archive
   DESTINATION lib/${PROJECT_NAME}
 )
