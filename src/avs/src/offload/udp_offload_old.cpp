@@ -232,6 +232,10 @@ static void usage(const char* p) {
   std::exit(1);
 }
 
+static inline void debug_print_record_size(const std::string& topic, std::uint64_t ts_ns, std::size_t size) {
+  std::cout << "[DEBUG] topic " << topic << " ts_ns " << ts_ns << " size " << size << "\n";
+}
+
 int main(int argc, char** argv) {
   std::string dst_ip;
   int dst_port = 0;
@@ -242,6 +246,7 @@ int main(int argc, char** argv) {
   std::uint64_t max_records = 0;
   std::size_t mtu_payload = 1200;
   int batch_us = 0;  // 0 means flush only by size
+  bool debug = false; // for record size check
 
   for (int i = 1; i < argc; ++i) {
     std::string a(argv[i]);
@@ -254,6 +259,7 @@ int main(int argc, char** argv) {
     if (a == "--max_records" && i + 1 < argc) { max_records = std::stoull(argv[++i]); continue; }
     if (a == "--mtu_payload" && i + 1 < argc) { mtu_payload = static_cast<std::size_t>(std::stoull(argv[++i])); continue; }
     if (a == "--batch_us" && i + 1 < argc) { batch_us = std::stoi(argv[++i]); continue; }
+    if (a == "--debug") { debug = true; continue; }
     usage(argv[0]);
   }
 
@@ -361,6 +367,10 @@ int main(int argc, char** argv) {
     std::string perr;
     if (!api.LoadPayload(r, payload, &perr)) {
       continue;
+    }
+
+    if (debug) {
+      debug_print_record_size(topic, r.ts_ns, payload.size());
     }
 
     RecHdr rh{};

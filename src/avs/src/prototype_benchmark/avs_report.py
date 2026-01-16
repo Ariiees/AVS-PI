@@ -25,8 +25,7 @@ from pathlib import Path
 
 import psutil
 
-# TARGET_EXES = ["image_subscriber", "lidar_subscriber", "gps_subscriber"]
-TARGET_EXES = ["image_subscriber_append", "lidar_subscriber_append", "gps_subscriber_append"]
+TARGET_EXES = ["image_subscriber", "lidar_subscriber", "gps_subscriber"]
 WRAPPERS = {"ros2", "python", "python3"}
 
 SSD_ROOT = Path("/home/avs/DATA/SSD")
@@ -200,16 +199,12 @@ def main():
             if args.namespace:
                 os.environ["ROS_NAMESPACE"] = args.namespace
 
-            # cmds = [
-            #     ["ros2", "run", "avs", "image_subscriber"],
-            #     ["ros2", "run", "avs", "lidar_subscriber"],
-            #     ["ros2", "run", "avs", "gps_subscriber"],
-            # ]
             cmds = [
-                ["ros2", "run", "avs", "image_subscriber_append"],
-                ["ros2", "run", "avs", "lidar_subscriber_append"],
-                ["ros2", "run", "avs", "gps_subscriber_append"],
+                ["ros2", "run", "avs", "image_subscriber"],
+                ["ros2", "run", "avs", "lidar_subscriber"],
+                ["ros2", "run", "avs", "gps_subscriber"],
             ]
+
             for c in cmds:
                 popens.append(start_proc(c))
 

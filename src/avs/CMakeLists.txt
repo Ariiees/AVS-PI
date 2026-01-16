@@ -63,55 +63,55 @@ include_directories(
   ${LIBARCHIVE_INCLUDE_DIRS}
 )
 
-# ========== File System Benchmark Image Write ==========
-add_executable(fs_img_write
-  src/benchmark/img_write_fs_benchmark.cpp
-)
+# # ========== File System Benchmark Image Write ==========
+# add_executable(fs_img_write
+#   src/benchmark/img_write_fs_benchmark.cpp
+# )
 
-target_link_libraries(fs_img_write
-  ${OpenCV_LIBS}
-  yaml-cpp
-)
+# target_link_libraries(fs_img_write
+#   ${OpenCV_LIBS}
+#   yaml-cpp
+# )
 
-ament_target_dependencies(fs_img_write
-  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
-)  
+# ament_target_dependencies(fs_img_write
+#   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
+# )  
 
-# ========== File System Benchmark Lidar Write ==========
-add_executable(fs_lidar_write
-  src/benchmark/lidar_write_fs_benchmark.cpp
-  src/process/lidar_compress.cpp
-)
+# # ========== File System Benchmark Lidar Write ==========
+# add_executable(fs_lidar_write
+#   src/benchmark/lidar_write_fs_benchmark.cpp
+#   src/process/lidar_compress.cpp
+# )
 
-target_link_libraries(fs_lidar_write
-  ${PCL_LIBRARIES}
-  ${PCL_IO_LIBRARIES}
-  ${LASZIP_LIBRARY}
-  yaml-cpp
-)
+# target_link_libraries(fs_lidar_write
+#   ${PCL_LIBRARIES}
+#   ${PCL_IO_LIBRARIES}
+#   ${LASZIP_LIBRARY}
+#   yaml-cpp
+# )
 
-ament_target_dependencies(fs_lidar_write
-   rclcpp sensor_msgs pcl_conversions yaml-cpp
-)  
+# ament_target_dependencies(fs_lidar_write
+#    rclcpp sensor_msgs pcl_conversions yaml-cpp
+# )  
 
 
-# ========== DB Benchmark ==========
-add_executable(db_benchmark
-  src/benchmark/db_benchmark.cpp
-)
+# # ========== DB Benchmark ==========
+# add_executable(db_benchmark
+#   src/benchmark/db_benchmark.cpp
+# )
 
-target_include_directories(db_benchmark 
-PRIVATE
-  ${SQLITE3_INCLUDE_DIRS}
-  ${ROCKSDB_INCLUDE_DIRS}
-)
+# target_include_directories(db_benchmark 
+# PRIVATE
+#   ${SQLITE3_INCLUDE_DIRS}
+#   ${ROCKSDB_INCLUDE_DIRS}
+# )
 
-target_link_libraries(db_benchmark
-  ${SQLITE3_LIBRARIES}
-  ${ROCKSDB_LIBRARIES}
-  Threads::Threads
-  dl
-)
+# target_link_libraries(db_benchmark
+#   ${SQLITE3_LIBRARIES}
+#   ${ROCKSDB_LIBRARIES}
+#   Threads::Threads
+#   dl
+# )
 
 # ========== Archive Move Manager ==========s
 add_executable(archive
@@ -206,6 +206,24 @@ ament_target_dependencies(retrieve_view
   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp pcl_conversions
 )
 
+# ========== UDP Offload ==========
+add_executable(udp_offload
+  src/offload/udp_offload.cpp
+  src/retrieve/retrieve_api.cpp
+)
+
+ament_target_dependencies(udp_offload
+  rclcpp
+)
+
+target_link_libraries(udp_offload
+  ${OpenCV_LIBS}
+  ${PCL_LIBRARIES}
+  ${PCL_IO_LIBRARIES}
+  ${LASZIP_LIBRARY}
+  ${SQLITE3_LIBRARIES}
+  ${VTK_LIBRARIES}
+)
 
 # ========== Install Targets ==========
 install(TARGETS
@@ -214,6 +232,7 @@ install(TARGETS
   gps_subscriber
   retrieve_view
   archive
+  udp_offload
   DESTINATION lib/${PROJECT_NAME}
 )
 

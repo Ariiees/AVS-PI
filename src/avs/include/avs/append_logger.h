@@ -87,7 +87,7 @@ private:
 
   std::mutex mu_;
 
-  size_t chunk_target_bytes_ = 256 * 1024;
+  size_t chunk_target_bytes_ = 2 * 1024 * 1024; //2MB
   uint64_t chunk_target_ns_ = 250000000ULL; // 250 ms
 };
 

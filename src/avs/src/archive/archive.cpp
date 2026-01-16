@@ -1,18 +1,22 @@
 // archive.cpp
 // AVS archive utility
+//
 // Usage
 //   archive <cutoff_day_YYYY-MM-DD> [topic]
+//
 // Behavior
-//   Archives all (topic, day) pairs in SSD global sqlite3 with day < cutoff_day.
+//   Archives all topic and day pairs in SSD global sqlite3 with day less than cutoff day.
 //   If topic is provided, only archives that topic.
-// Notes
-//   This program writes one tar per (topic, day) on HDD and a small tar index
-//   file alongside the tar. The filesystem does not interpret tar.
-//   AVS uses the tar index to locate trip logs and trip indices by byte offset.
+//   Writes one tar per topic per day on HDD plus a small tar index file alongside the tar.
+//   Uses the tar index to locate members by byte offset for cold query.
 //
 // Output format
-//   ARCHIVE_PER topic=... folder=... day=... tar_bytes=... wall_s=... tar_MBps=... ssd_removed_bytes=... hdd_written_bytes=...
-//   ARCHIVE_SUM pairs=... ssd_removed_bytes=... hdd_written_bytes=... tar_bytes=...
+//   ARCHIVE_SUM pairs=... ssd_removed_bytes=... hdd_written_bytes=... tar_bytes=... wall_s=... tar_MBps=...
+//
+// Correctness and cost
+//   Default mode uses fdatasync on tar and index and relies on rename atomicity.
+//   Optional strict mode also fsyncs the parent directory after renames.
+//   Strict mode is enabled by setting environment variable AVS_ARCHIVE_STRICT=1.
 
 #include <sqlite3.h>
 
@@ -26,7 +30,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -36,10 +39,15 @@
 #include <utility>
 #include <vector>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#ifdef __linux__
+#include <linux/fs.h>
+#endif
 
 #include "avs/topic_map.h"
 
@@ -49,8 +57,13 @@ namespace avs {
 
 static constexpr size_t kTarBlock = 512;
 
+static bool EnvIsOne(const char* name) {
+  const char* v = std::getenv(name);
+  if (!v) return false;
+  return std::string(v) == "1";
+}
+
 static std::string NormalizeDayToDash(const std::string& in) {
-  // Accept only YYYY-MM-DD or YYYY_MM_DD, return YYYY-MM-DD
   if (in.size() != 10) throw std::runtime_error("bad day format: " + in);
 
   auto is_digit = [](char c) { return c >= '0' && c <= '9'; };
@@ -97,8 +110,56 @@ static void CheckedFsync(int fd) {
   }
 }
 
+static void CheckedFdatasync(int fd) {
+  for (;;) {
+    if (::fdatasync(fd) == 0) return;
+    if (errno == EINTR) continue;
+    ThrowErrno("fdatasync");
+  }
+}
+
 static uint64_t RoundUp512(uint64_t n) {
   return (n + (kTarBlock - 1)) & ~(static_cast<uint64_t>(kTarBlock - 1));
+}
+
+static uint64_t FileMtimeSeconds(const fs::path& p) {
+  std::error_code ec;
+  auto ftime = fs::last_write_time(p, ec);
+  if (ec) return 0;
+  auto s = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+  return static_cast<uint64_t>(s.time_since_epoch().count());
+}
+
+static uint64_t FileSize(const fs::path& p) {
+  std::error_code ec;
+  auto sz = fs::file_size(p, ec);
+  if (ec) throw std::runtime_error("file_size failed: " + p.string() + " " + ec.message());
+  return static_cast<uint64_t>(sz);
+}
+
+static uint64_t DirTotalSize(const fs::path& dir) {
+  uint64_t sum = 0;
+  std::error_code ec;
+  if (!fs::exists(dir, ec)) return 0;
+  for (auto it = fs::recursive_directory_iterator(dir, ec);
+       !ec && it != fs::recursive_directory_iterator();
+       it.increment(ec)) {
+    if (ec) break;
+    if (it->is_regular_file()) sum += static_cast<uint64_t>(it->file_size());
+  }
+  return sum;
+}
+
+static void RemoveAll(const fs::path& p) {
+  std::error_code ec;
+  fs::remove_all(p, ec);
+  if (ec) throw std::runtime_error("remove_all failed: " + p.string() + " " + ec.message());
+}
+
+static void EnsureDir(const fs::path& p) {
+  std::error_code ec;
+  fs::create_directories(p, ec);
+  if (ec) throw std::runtime_error("create_directories failed: " + p.string() + " " + ec.message());
 }
 
 // Minimal ustar header
@@ -161,7 +222,9 @@ static void FillTarHeader(TarHeader& h,
   std::memset(h.chksum, ' ', sizeof(h.chksum));
   h.typeflag = '0';
   std::snprintf(h.magic, sizeof(h.magic), "ustar");
-  std::snprintf(h.version, sizeof(h.version), "00");
+  h.version[0] = '0';
+  h.version[1] = '0';
+
   std::snprintf(h.uname, sizeof(h.uname), "avs");
   std::snprintf(h.gname, sizeof(h.gname), "avs");
 
@@ -180,55 +243,158 @@ struct TarIndexEntry {
   uint64_t size = 0;
 };
 
-static void WriteTarIndexFile(const fs::path& idx_path_tmp,
-                              const std::vector<TarIndexEntry>& entries) {
-  std::ofstream ofs(idx_path_tmp, std::ios::binary | std::ios::trunc);
-  if (!ofs) throw std::runtime_error("cannot open tar index for write");
+static uint64_t EstimateTarSizeBytes(const std::vector<fs::path>& files) {
+  uint64_t total = 0;
+  for (const auto& f : files) {
+    uint64_t sz = FileSize(f);
+    total += kTarBlock;              // header
+    total += RoundUp512(sz);         // payload padded
+  }
+  total += 2 * kTarBlock;            // end blocks
+  return total;
+}
+
+static void WriteTarIndexFileAndSync(const fs::path& idx_path_tmp,
+                                     const std::vector<TarIndexEntry>& entries,
+                                     bool strict_mode) {
+  int fd = ::open(idx_path_tmp.string().c_str(),
+                  O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+  if (fd < 0) ThrowErrno("open tar index tmp");
+
+  std::string line;
+  line.reserve(256);
+
   for (const auto& e : entries) {
-    ofs << e.name << "\t" << e.data_offset << "\t" << e.size << "\n";
+    line.clear();
+    line.append(e.name);
+    line.push_back('\t');
+    line.append(std::to_string(e.data_offset));
+    line.push_back('\t');
+    line.append(std::to_string(e.size));
+    line.push_back('\n');
+    CheckedWriteAll(fd, line.data(), line.size());
   }
-  ofs.flush();
-  if (!ofs) throw std::runtime_error("tar index write failed");
+
+  if (strict_mode) {
+    CheckedFsync(fd);
+  } else {
+    CheckedFdatasync(fd);
+  }
+  ::close(fd);
 }
 
-static void EnsureDir(const fs::path& p) {
-  std::error_code ec;
-  fs::create_directories(p, ec);
-  if (ec) throw std::runtime_error("create_directories failed: " + p.string() + " " + ec.message());
+static std::pair<std::string, std::string> YearMonthFromDayDash(const std::string& day_dash) {
+  if (day_dash.size() != 10 || day_dash[4] != '-' || day_dash[7] != '-') {
+    throw std::runtime_error("bad day string: " + day_dash);
+  }
+  return {day_dash.substr(0, 4), day_dash.substr(5, 2)};
 }
 
-static uint64_t FileMtimeSeconds(const fs::path& p) {
+static std::vector<fs::path> ListTripFiles(const fs::path& day_dir) {
+  std::vector<fs::path> files;
   std::error_code ec;
-  auto ftime = fs::last_write_time(p, ec);
-  if (ec) return 0;
-  auto s = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
-  return static_cast<uint64_t>(s.time_since_epoch().count());
-}
+  if (!fs::exists(day_dir, ec)) return files;
 
-static uint64_t FileSize(const fs::path& p) {
-  std::error_code ec;
-  auto sz = fs::file_size(p, ec);
-  if (ec) throw std::runtime_error("file_size failed: " + p.string() + " " + ec.message());
-  return static_cast<uint64_t>(sz);
-}
-
-static uint64_t DirTotalSize(const fs::path& dir) {
-  uint64_t sum = 0;
-  std::error_code ec;
-  if (!fs::exists(dir, ec)) return 0;
-  for (auto it = fs::recursive_directory_iterator(dir, ec);
-       !ec && it != fs::recursive_directory_iterator();
-       it.increment(ec)) {
+  for (auto& ent : fs::directory_iterator(day_dir, ec)) {
     if (ec) break;
-    if (it->is_regular_file()) sum += static_cast<uint64_t>(it->file_size());
+    if (!ent.is_regular_file()) continue;
+
+    auto name = ent.path().filename().string();
+
+    if (name.rfind("trip_", 0) == 0) {
+      if (name.find(".log") != std::string::npos || name.find(".idx") != std::string::npos) {
+        files.push_back(ent.path());
+      }
+    }
+
+    if (name == "day.idx" || name == "day.log") {
+      files.push_back(ent.path());
+    }
   }
-  return sum;
+
+  std::sort(files.begin(), files.end());
+  return files;
 }
 
-static void RemoveAll(const fs::path& p) {
-  std::error_code ec;
-  fs::remove_all(p, ec);
-  if (ec) throw std::runtime_error("remove_all failed: " + p.string() + " " + ec.message());
+static void PosixFadviseSequential(int fd) {
+#ifdef __linux__
+  (void)::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+}
+
+static void TryFallocate(int fd, uint64_t size) {
+#ifdef __linux__
+  (void)::fallocate(fd, 0, 0, static_cast<off_t>(size));
+#else
+  (void)fd;
+  (void)size;
+#endif
+}
+
+static void WriteFileIntoTar(int tar_fd,
+                             const fs::path& src_path,
+                             const std::string& tar_member_path,
+                             uint64_t& tar_offset_inout,
+                             std::vector<TarIndexEntry>& tar_index,
+                             std::vector<uint8_t>& io_buf,
+                             const std::array<uint8_t, kTarBlock>& zero_block) {
+  const uint64_t sz = FileSize(src_path);
+  const uint64_t mtime = FileMtimeSeconds(src_path);
+
+  TarHeader h;
+  FillTarHeader(h, tar_member_path, sz, mtime, 0644);
+
+  CheckedWriteAll(tar_fd, &h, sizeof(h));
+  tar_offset_inout += kTarBlock;
+
+  TarIndexEntry idx;
+  idx.name = tar_member_path;
+  idx.data_offset = tar_offset_inout;
+  idx.size = sz;
+  tar_index.push_back(idx);
+
+  int in_fd = ::open(src_path.string().c_str(), O_RDONLY | O_CLOEXEC);
+  if (in_fd < 0) ThrowErrno("open input file");
+  PosixFadviseSequential(in_fd);
+
+  uint64_t left = sz;
+  while (left > 0) {
+    size_t chunk = static_cast<size_t>(std::min<uint64_t>(left, io_buf.size()));
+    ssize_t r = ::read(in_fd, io_buf.data(), chunk);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      ::close(in_fd);
+      ThrowErrno("read input file");
+    }
+    if (r == 0) {
+      ::close(in_fd);
+      throw std::runtime_error("unexpected eof while reading input");
+    }
+    CheckedWriteAll(tar_fd, io_buf.data(), static_cast<size_t>(r));
+    left -= static_cast<uint64_t>(r);
+    tar_offset_inout += static_cast<uint64_t>(r);
+  }
+
+  ::close(in_fd);
+
+  uint64_t padded = RoundUp512(sz);
+  uint64_t pad = padded - sz;
+  while (pad > 0) {
+    size_t w = static_cast<size_t>(std::min<uint64_t>(pad, zero_block.size()));
+    CheckedWriteAll(tar_fd, zero_block.data(), w);
+    tar_offset_inout += static_cast<uint64_t>(w);
+    pad -= static_cast<uint64_t>(w);
+  }
+}
+
+static void FsyncParentDirIfStrict(const fs::path& final_path, bool strict_mode) {
+  if (!strict_mode) return;
+
+  fs::path parent = final_path.parent_path();
+  int dfd = ::open(parent.string().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dfd < 0) return;
+  CheckedFsync(dfd);
+  ::close(dfd);
 }
 
 // sqlite helpers
@@ -277,7 +443,7 @@ static void EnsureGlobalSchema(SqliteDb& db) {
 
 struct TopicDay {
   std::string topic;
-  std::string day;  // may be legacy, normalize at use sites
+  std::string day;
   bool operator<(const TopicDay& o) const {
     if (topic != o.topic) return topic < o.topic;
     return day < o.day;
@@ -289,7 +455,6 @@ static std::vector<TopicDay> QueryCandidates(SqliteDb& ssd_db,
                                              const std::optional<std::string>& topic_filter) {
   std::vector<TopicDay> out;
 
-  // Robust: normalize day in DB by replacing '_' with '-', compare against normalized cutoff
   std::string sql =
     "SELECT DISTINCT sensor_topic, day "
     "FROM global "
@@ -399,103 +564,6 @@ static void DeleteRowsTopicDay(SqliteDb& db, const std::string& topic, const std
   if (rc != SQLITE_DONE) throw std::runtime_error("sqlite delete failed");
 }
 
-static std::pair<std::string, std::string> YearMonthFromDayDash(const std::string& day_dash) {
-  // day_dash must be YYYY-MM-DD
-  if (day_dash.size() != 10 || day_dash[4] != '-' || day_dash[7] != '-') {
-    throw std::runtime_error("bad day string: " + day_dash);
-  }
-  return {day_dash.substr(0, 4), day_dash.substr(5, 2)};
-}
-
-static std::vector<fs::path> ListTripFiles(const fs::path& day_dir) {
-  std::vector<fs::path> files;
-  std::error_code ec;
-  if (!fs::exists(day_dir, ec)) return files;
-
-  for (auto& ent : fs::directory_iterator(day_dir, ec)) {
-    if (ec) break;
-    if (!ent.is_regular_file()) continue;
-
-    auto name = ent.path().filename().string();
-
-    if (name.rfind("trip_", 0) == 0) {
-      if (name.find(".log") != std::string::npos || name.find(".idx") != std::string::npos) {
-        files.push_back(ent.path());
-      }
-    }
-
-    if (name == "day.idx" || name == "day.log") {
-      files.push_back(ent.path());
-    }
-  }
-
-  std::sort(files.begin(), files.end());
-  return files;
-}
-
-static void WriteFileIntoTar(int tar_fd,
-                             const fs::path& src_path,
-                             const std::string& tar_member_path,
-                             uint64_t& tar_offset_inout,
-                             std::vector<TarIndexEntry>& tar_index) {
-  const uint64_t sz = FileSize(src_path);
-  const uint64_t mtime = FileMtimeSeconds(src_path);
-
-  TarHeader h;
-  FillTarHeader(h, tar_member_path, sz, mtime, 0644);
-
-  CheckedWriteAll(tar_fd, &h, sizeof(h));
-  tar_offset_inout += kTarBlock;
-
-  TarIndexEntry idx;
-  idx.name = tar_member_path;
-  idx.data_offset = tar_offset_inout;
-  idx.size = sz;
-  tar_index.push_back(idx);
-
-  int in_fd = ::open(src_path.string().c_str(), O_RDONLY | O_CLOEXEC);
-  if (in_fd < 0) ThrowErrno("open input file");
-
-  std::vector<uint8_t> buf(1024 * 1024);
-  uint64_t left = sz;
-
-  while (left > 0) {
-    size_t chunk = static_cast<size_t>(std::min<uint64_t>(left, buf.size()));
-    ssize_t r = ::read(in_fd, buf.data(), chunk);
-    if (r < 0) {
-      if (errno == EINTR) continue;
-      ::close(in_fd);
-      ThrowErrno("read input file");
-    }
-    if (r == 0) {
-      ::close(in_fd);
-      throw std::runtime_error("unexpected eof while reading input");
-    }
-    CheckedWriteAll(tar_fd, buf.data(), static_cast<size_t>(r));
-    left -= static_cast<uint64_t>(r);
-    tar_offset_inout += static_cast<uint64_t>(r);
-  }
-
-  ::close(in_fd);
-
-  uint64_t padded = RoundUp512(sz);
-  uint64_t pad = padded - sz;
-  if (pad) {
-    std::vector<uint8_t> zeros(static_cast<size_t>(pad), 0);
-    CheckedWriteAll(tar_fd, zeros.data(), zeros.size());
-    tar_offset_inout += pad;
-  }
-}
-
-struct ArchiveStats {
-  uint64_t ssd_bytes_removed = 0;
-  uint64_t hdd_bytes_written = 0;
-  uint64_t tar_bytes = 0;
-  double wall_s = 0.0;
-  std::string folder;
-  std::string day_dash;
-};
-
 static std::string ResolveFolderOrThrow(const TopicMap& topic_map, const std::string& topic) {
   std::string folder = GetTopicFolder(topic_map, topic);
   if (folder.empty()) throw std::runtime_error("topic not found in topics yaml: " + topic);
@@ -505,7 +573,6 @@ static std::string ResolveFolderOrThrow(const TopicMap& topic_map, const std::st
 static fs::path ResolveSsdDayDirPreferDash(const fs::path& ssd_root,
                                           const std::string& folder,
                                           const std::string& day_dash) {
-  // Canonical storage is YYYY-MM-DD, but tolerate legacy YYYY_MM_DD directories.
   fs::path p = ssd_root / folder / day_dash;
   if (fs::exists(p)) return p;
 
@@ -515,8 +582,14 @@ static fs::path ResolveSsdDayDirPreferDash(const fs::path& ssd_root,
   fs::path alt = ssd_root / folder / legacy;
   if (fs::exists(alt)) return alt;
 
-  return p;  // will fail later with clear message
+  return p;
 }
+
+struct ArchiveStats {
+  uint64_t ssd_bytes_removed = 0;
+  uint64_t hdd_bytes_written = 0;
+  uint64_t tar_bytes = 0;
+};
 
 static ArchiveStats ArchiveOneTopicDay(const fs::path& ssd_root,
                                        const fs::path& hdd_root,
@@ -524,72 +597,75 @@ static ArchiveStats ArchiveOneTopicDay(const fs::path& ssd_root,
                                        SqliteDb& hdd_db,
                                        const TopicMap& topic_map,
                                        const std::string& topic,
-                                       const std::string& day_from_db_exact) {
+                                       const std::string& day_from_db_exact,
+                                       bool strict_mode,
+                                       std::vector<uint8_t>& io_buf,
+                                       const std::array<uint8_t, kTarBlock>& zero_block) {
   ArchiveStats st;
 
-  st.folder = ResolveFolderOrThrow(topic_map, topic);
+  std::string folder = ResolveFolderOrThrow(topic_map, topic);
+  std::string day_dash = NormalizeDayToDash(day_from_db_exact);
 
-  // Canonical day for path naming and reporting
-  st.day_dash = NormalizeDayToDash(day_from_db_exact);
-
-  fs::path ssd_day_dir = ResolveSsdDayDirPreferDash(ssd_root, st.folder, st.day_dash);
+  fs::path ssd_day_dir = ResolveSsdDayDirPreferDash(ssd_root, folder, day_dash);
   st.ssd_bytes_removed = DirTotalSize(ssd_day_dir);
 
-  auto [yyyy, mm] = YearMonthFromDayDash(st.day_dash);
-  fs::path hdd_topic_dir = hdd_root / st.folder / yyyy / mm;
+  auto [yyyy, mm] = YearMonthFromDayDash(day_dash);
+  fs::path hdd_topic_dir = hdd_root / folder / yyyy / mm;
   EnsureDir(hdd_topic_dir);
 
-  fs::path tar_final = hdd_topic_dir / (st.day_dash + ".tar");
-  fs::path tar_tmp   = hdd_topic_dir / (st.day_dash + ".tar.tmp");
-  fs::path idx_final = hdd_topic_dir / (st.day_dash + ".tar.idx");
-  fs::path idx_tmp   = hdd_topic_dir / (st.day_dash + ".tar.idx.tmp");
+  fs::path tar_final = hdd_topic_dir / (day_dash + ".tar");
+  fs::path tar_tmp   = hdd_topic_dir / (day_dash + ".tar.tmp");
+  fs::path idx_final = hdd_topic_dir / (day_dash + ".tar.idx");
+  fs::path idx_tmp   = hdd_topic_dir / (day_dash + ".tar.idx.tmp");
 
   if (fs::exists(tar_final)) {
     throw std::runtime_error("tar already exists: " + tar_final.string());
   }
 
-  int tar_fd = ::open(tar_tmp.string().c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
-  if (tar_fd < 0) ThrowErrno("open tar tmp");
-
-  std::vector<TarIndexEntry> tar_index;
-  uint64_t tar_offset = 0;
-
   auto files = ListTripFiles(ssd_day_dir);
   if (files.empty()) {
-    ::close(tar_fd);
     throw std::runtime_error("no trip files found in " + ssd_day_dir.string());
   }
 
+  int tar_fd = ::open(tar_tmp.string().c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+  if (tar_fd < 0) ThrowErrno("open tar tmp");
+
+  PosixFadviseSequential(tar_fd);
+
+  uint64_t est = EstimateTarSizeBytes(files);
+  TryFallocate(tar_fd, est);
+
+  std::vector<TarIndexEntry> tar_index;
+  tar_index.reserve(files.size());
+
+  uint64_t tar_offset = 0;
+
   for (const auto& f : files) {
-    std::string member = st.day_dash + "/" + f.filename().string();
-    WriteFileIntoTar(tar_fd, f, member, tar_offset, tar_index);
+    std::string member = day_dash + "/" + f.filename().string();
+    WriteFileIntoTar(tar_fd, f, member, tar_offset, tar_index, io_buf, zero_block);
   }
 
-  std::array<uint8_t, kTarBlock> zero{};
-  CheckedWriteAll(tar_fd, zero.data(), zero.size());
-  CheckedWriteAll(tar_fd, zero.data(), zero.size());
+  CheckedWriteAll(tar_fd, zero_block.data(), zero_block.size());
+  CheckedWriteAll(tar_fd, zero_block.data(), zero_block.size());
   tar_offset += 2 * kTarBlock;
 
-  CheckedFsync(tar_fd);
+  if (strict_mode) {
+    CheckedFsync(tar_fd);
+  } else {
+    CheckedFdatasync(tar_fd);
+  }
   ::close(tar_fd);
 
-  WriteTarIndexFile(idx_tmp, tar_index);
-
-  {
-    int idx_fd = ::open(idx_tmp.string().c_str(), O_RDONLY | O_CLOEXEC);
-    if (idx_fd >= 0) {
-      CheckedFsync(idx_fd);
-      ::close(idx_fd);
-    }
-  }
+  WriteTarIndexFileAndSync(idx_tmp, tar_index, strict_mode);
 
   fs::rename(tar_tmp, tar_final);
   fs::rename(idx_tmp, idx_final);
 
+  FsyncParentDirIfStrict(tar_final, strict_mode);
+
   st.tar_bytes = FileSize(tar_final);
   st.hdd_bytes_written = st.tar_bytes + FileSize(idx_final);
 
-  // Copy and delete rows using exact day string as stored in DB
   CopyRowsTopicDay(ssd_db, hdd_db, topic, day_from_db_exact);
   DeleteRowsTopicDay(ssd_db, topic, day_from_db_exact);
 
@@ -610,6 +686,8 @@ int main(int argc, char** argv) {
       avs::PrintUsage();
       return 2;
     }
+
+    const bool strict_mode = avs::EnvIsOne("AVS_ARCHIVE_STRICT");
 
     fs::path ssd_root("/home/avs/DATA/SSD");
     fs::path hdd_root("/home/avs/DATA/HDD");
@@ -632,8 +710,14 @@ int main(int argc, char** argv) {
     avs::EnsureGlobalSchema(hdd_db);
 
     auto candidates = avs::QueryCandidates(ssd_db, cutoff_day, topic_filter);
+
+    auto t0 = std::chrono::steady_clock::now();
+
     if (candidates.empty()) {
-      std::cout << "ARCHIVE_SUM pairs=0 ssd_removed_bytes=0 hdd_written_bytes=0 tar_bytes=0\n";
+      auto t1 = std::chrono::steady_clock::now();
+      double wall_s = std::chrono::duration<double>(t1 - t0).count();
+      std::cout << "ARCHIVE_SUM pairs=0 ssd_removed_bytes=0 hdd_written_bytes=0 tar_bytes=0 wall_s="
+                << wall_s << " tar_MBps=0\n";
       return 0;
     }
 
@@ -642,37 +726,33 @@ int main(int argc, char** argv) {
     uint64_t total_tar_bytes = 0;
     uint64_t archived_pairs = 0;
 
+    std::vector<uint8_t> io_buf(8 * 1024 * 1024);
+    std::array<uint8_t, avs::kTarBlock> zero_block{};
+    zero_block.fill(0);
+
     for (const auto& td : candidates) {
-      auto t0 = std::chrono::steady_clock::now();
-      auto st = avs::ArchiveOneTopicDay(ssd_root, hdd_root, ssd_db, hdd_db, topic_map, td.topic, td.day);
-      auto t1 = std::chrono::steady_clock::now();
-      st.wall_s = std::chrono::duration<double>(t1 - t0).count();
+      auto st = avs::ArchiveOneTopicDay(
+        ssd_root, hdd_root, ssd_db, hdd_db, topic_map, td.topic, td.day,
+        strict_mode, io_buf, zero_block);
 
       total_ssd_removed += st.ssd_bytes_removed;
       total_hdd_written += st.hdd_bytes_written;
       total_tar_bytes += st.tar_bytes;
       archived_pairs += 1;
-
-      double mb = static_cast<double>(st.tar_bytes) / (1024.0 * 1024.0);
-      double mbps = st.wall_s > 0 ? mb / st.wall_s : 0;
-
-      std::cout << "ARCHIVE_PER"
-                << " topic=" << td.topic
-                << " folder=" << st.folder
-                << " day=" << st.day_dash
-                << " tar_bytes=" << st.tar_bytes
-                << " wall_s=" << st.wall_s
-                << " tar_MBps=" << mbps
-                << " ssd_removed_bytes=" << st.ssd_bytes_removed
-                << " hdd_written_bytes=" << st.hdd_bytes_written
-                << "\n";
     }
+
+    auto t1 = std::chrono::steady_clock::now();
+    double wall_s = std::chrono::duration<double>(t1 - t0).count();
+    double mb = static_cast<double>(total_tar_bytes) / (1024.0 * 1024.0);
+    double mbps = wall_s > 0 ? mb / wall_s : 0;
 
     std::cout << "ARCHIVE_SUM"
               << " pairs=" << archived_pairs
               << " ssd_removed_bytes=" << total_ssd_removed
               << " hdd_written_bytes=" << total_hdd_written
               << " tar_bytes=" << total_tar_bytes
+              << " wall_s=" << wall_s
+              << " tar_MBps=" << mbps
               << "\n";
     return 0;
 

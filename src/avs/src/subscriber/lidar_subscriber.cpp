@@ -124,30 +124,30 @@ private:
     using rclcpp::ReliabilityPolicy;
 
     rclcpp::QoS qos = rclcpp::SensorDataQoS();  // BestEffort, small depth
-    qos.durability(rclcpp::DurabilityPolicy::Volatile);
+    // qos.durability(rclcpp::DurabilityPolicy::Volatile);
 
-    for (int i = 0; i < 50; ++i) {
-      auto infos = this->get_publishers_info_by_topic(topic);
-      if (!infos.empty()) {
-        auto offered = infos.front().qos_profile();
+    // for (int i = 0; i < 50; ++i) {
+    //   auto infos = this->get_publishers_info_by_topic(topic);
+    //   if (!infos.empty()) {
+    //     auto offered = infos.front().qos_profile();
 
-        qos.reliability(offered.reliability());
+    //     qos.reliability(offered.reliability());
 
-        RCLCPP_INFO(
-          this->get_logger(),
-          "QoS for %s -> depth=10 reliability=%d durability=%d",
-          topic.c_str(),
-          static_cast<int>(qos.get_rmw_qos_profile().reliability),
-          static_cast<int>(qos.get_rmw_qos_profile().durability));
+    //     RCLCPP_INFO(
+    //       this->get_logger(),
+    //       "QoS for %s -> depth=10 reliability=%d durability=%d",
+    //       topic.c_str(),
+    //       static_cast<int>(qos.get_rmw_qos_profile().reliability),
+    //       static_cast<int>(qos.get_rmw_qos_profile().durability));
 
-        return qos;
-      }
-      rclcpp::sleep_for(std::chrono::milliseconds(100));
-    }
+    //     return qos;
+    //   }
+    //   rclcpp::sleep_for(std::chrono::milliseconds(100));
+    // }
 
-    RCLCPP_WARN(this->get_logger(),
-                "No publisher QoS detected on %s; using fallback QoS(KEEP_LAST depth=10, BestEffort, VOLATILE)",
-                topic.c_str());
+    // RCLCPP_WARN(this->get_logger(),
+    //             "No publisher QoS detected on %s; using fallback QoS(KEEP_LAST depth=10, BestEffort, VOLATILE)",
+    //             topic.c_str());
     return qos;
   }
 

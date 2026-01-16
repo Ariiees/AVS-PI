@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# archive_bench.py
+# archive_report.py
 #
 # Usage
-#   chmod +x archive_bench.py
-#   ./archive_bench.py <cutoff_day_YYYY-MM-DD> [topic]
+#   chmod +x archive_report.py
+#   ./archive_report.py <cutoff_day_YYYY-MM-DD> [topic]
 #
 # Behavior
-#   - Runs: ros2 run avs archive <cutoff_day> [topic]
-#   - Streams ALL archive.cpp stdout lines to terminal unchanged (ARCHIVE_PER, ARCHIVE_SUM, errors, etc.)
-#   - Samples process CPU% and RSS during the run
-#   - Prints ONE extra line at the end:
-#       BENCH_SUM avg_cpu_pct=... max_cpu_pct=... avg_rss_kb=... max_rss_kb=... exit_code=...
+#   Runs: ros2 run avs archive <cutoff_day> [topic]
+#   Streams archive stdout lines to terminal unchanged
+#   Samples process CPU percent and RSS during the run
+#   Prints one extra line at the end
+#     BENCH_SUM avg_cpu_pct=... max_cpu_pct=... avg_rss_kb=... max_rss_kb=... exit_code=...
 
 import sys
 import time
@@ -24,7 +24,6 @@ except Exception as e:
 
 
 def normalize_day(day: str) -> str:
-    # Enforce YYYY-MM-DD (no conversion to underscores)
     if len(day) != 10:
         raise ValueError(f"bad day: {day}")
     if day[4] != "-" or day[7] != "-":
@@ -34,7 +33,7 @@ def normalize_day(day: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("usage: archive_bench.py <cutoff_day_YYYY-MM-DD> [topic]", file=sys.stderr)
+        print("usage: archive_report.py <cutoff_day_YYYY-MM-DD> [topic]", file=sys.stderr)
         return 2
 
     cutoff = normalize_day(sys.argv[1])
@@ -49,13 +48,12 @@ def main() -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1,          # line buffered
+        bufsize=1,
         universal_newlines=True,
     )
 
     proc = psutil.Process(p.pid)
 
-    # Prime cpu_percent so the next call measures interval usage.
     try:
         proc.cpu_percent(interval=None)
     except Exception:
@@ -65,12 +63,10 @@ def main() -> int:
     cpu_samples = []
     rss_samples_kb = []
 
-    # Stream output in real time while sampling CPU and RSS.
     assert p.stdout is not None
     last_sample_t = time.time()
 
     for line in p.stdout:
-        # Pass through archive.cpp output unchanged
         sys.stdout.write(line)
         sys.stdout.flush()
 
@@ -91,7 +87,6 @@ def main() -> int:
 
     rc = p.wait()
 
-    # Final sample after exit (best effort)
     try:
         rss_kb = int(proc.memory_info().rss // 1024)
         rss_samples_kb.append(rss_kb)
