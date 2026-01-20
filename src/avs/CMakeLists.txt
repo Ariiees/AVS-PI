@@ -207,16 +207,16 @@ ament_target_dependencies(retrieve_view
 )
 
 # ========== UDP Offload ==========
-add_executable(udp_offload
-  src/offload/udp_offload.cpp
+add_executable(offload
+  src/offload/offload.cpp
   src/retrieve/retrieve_api.cpp
 )
 
-ament_target_dependencies(udp_offload
+ament_target_dependencies(offload
   rclcpp
 )
 
-target_link_libraries(udp_offload
+target_link_libraries(offload
   ${OpenCV_LIBS}
   ${PCL_LIBRARIES}
   ${PCL_IO_LIBRARIES}
@@ -232,7 +232,7 @@ install(TARGETS
   gps_subscriber
   retrieve_view
   archive
-  udp_offload
+  offload
   DESTINATION lib/${PROJECT_NAME}
 )
 
