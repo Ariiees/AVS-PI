@@ -225,6 +225,19 @@ target_link_libraries(offload
   ${VTK_LIBRARIES}
 )
 
+# ========== Debug Payload Size ==========
+add_executable(debug
+  src/debug/debug.cpp
+  src/retrieve/retrieve_api.cpp
+)
+
+target_link_libraries(debug
+  ${SQLITE3_LIBRARIES}
+)
+
+ament_target_dependencies(debug
+  rclcpp sensor_msgs yaml-cpp 
+)
 # ========== Install Targets ==========
 install(TARGETS
   image_subscriber
@@ -233,6 +246,7 @@ install(TARGETS
   retrieve_view
   archive
   offload
+  debug
   DESTINATION lib/${PROJECT_NAME}
 )
 

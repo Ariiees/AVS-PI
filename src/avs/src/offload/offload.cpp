@@ -3,16 +3,19 @@
 //   g++ -O2 -std=c++17 offload_sender_tcp_cloud_batch.cpp -o offload_sender_tcp_cloud_batch
 //
 // Run
-//   ros2 run avs offload <dst_ip> <dst_port> <start_ts_ns> <end_ts_ns> <topics_csv> [ssd_root] [max_records] [runs] [batch_records]
+//   ros2 run avs offload <dst_ip> <dst_port> <start_ts_ns> <end_ts_ns> <topics_csv> <max_records> [runs]
 //
 // Behavior changes
 //   Topic is sent once in Start, per record topic bytes removed
 //   Records are batched into one kMsgRec frame with many entries
-//   One writev per batch to reduce syscall overhead
+//   One sendmsg per batch without copying payload bytes
+//   Dynamic batch size tuned from payload sizes (image/lidar/gps)
 //
 // Printed metrics remain compatible with your current parser output fields
 
 #include <arpa/inet.h>
+#include <cerrno>
+#include <climits>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
@@ -28,8 +31,11 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
-
 #include "avs/retrieve_api.h"
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 namespace fs = std::filesystem;
 
@@ -40,24 +46,47 @@ static inline std::uint64_t mono_ns() {
     .count();
 }
 
-static bool send_all(int fd, const void* buf, std::size_t n) {
-  const std::uint8_t* p = static_cast<const std::uint8_t*>(buf);
-  std::size_t off = 0;
-  while (off < n) {
-    ssize_t rc = ::send(fd, p + off, n - off, 0);
-    if (rc <= 0) return false;
-    off += (std::size_t)rc;
-  }
-  return true;
-}
-
 static bool recv_all(int fd, void* buf, std::size_t n) {
   std::uint8_t* p = static_cast<std::uint8_t*>(buf);
   std::size_t off = 0;
   while (off < n) {
     ssize_t rc = ::recv(fd, p + off, n - off, 0);
-    if (rc <= 0) return false;
+    if (rc < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (rc == 0) return false;
     off += (std::size_t)rc;
+  }
+  return true;
+}
+
+static bool sendmsg_full(int fd, std::vector<iovec>& iov) {
+  std::size_t idx = 0;
+  while (idx < iov.size()) {
+    msghdr msg{};
+    msg.msg_iov = iov.data() + idx;
+    msg.msg_iovlen = iov.size() - idx;
+
+    ssize_t rc = ::sendmsg(fd, &msg, MSG_NOSIGNAL);
+    if (rc < 0) {
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      return false;
+    }
+    if (rc == 0) return false;
+
+    std::size_t remaining = (std::size_t)rc;
+    while (idx < iov.size() && remaining > 0) {
+      if (remaining >= iov[idx].iov_len) {
+        remaining -= iov[idx].iov_len;
+        idx += 1;
+      } else {
+        iov[idx].iov_base = static_cast<char*>(iov[idx].iov_base) + remaining;
+        iov[idx].iov_len -= remaining;
+        remaining = 0;
+      }
+    }
   }
   return true;
 }
@@ -214,7 +243,7 @@ struct AckBody {
 static void usage(const char* p) {
   std::cerr
     << "Usage:\n"
-    << "  " << p << " dst_ip dst_port start_ts_ns end_ts_ns topics_csv max_records [runs] [batch_records]\n";
+    << "  " << p << " dst_ip dst_port start_ts_ns end_ts_ns topics_csv max_records [runs]\n";
   std::exit(2);
 }
 
@@ -230,16 +259,13 @@ int main(int argc, char** argv) {
 
   fs::path ssd_root("/home/avs/DATA/SSD");
   int runs = 10;
-  std::uint32_t batch_records = 128;
 
-  if (argc >= 8) runs = std::stoi(argv[8]);
-  if (argc >= 9) batch_records = (std::uint32_t)std::stoul(argv[9]);
+  if (argc >= 8) runs = std::stoi(argv[7]);
 
   if (dst_ip.empty() || dst_port <= 0 || start_ns == 0 || end_ns == 0 || end_ns < start_ns || topics_csv.empty()) {
     usage(argv[0]);
   }
   if (runs <= 0) runs = 1;
-  if (batch_records == 0) batch_records = 1;
 
   std::vector<std::string> topics = split_csv(topics_csv);
   if (topics.size() != 1) {
@@ -280,7 +306,7 @@ int main(int argc, char** argv) {
     int s = ::socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) { std::perror("socket"); return 1; }
 
-    int sndbuf = 8 * 1024 * 1024;
+    int sndbuf = 16 * 1024 * 1024;
     (void)setsockopt(s, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
     sockaddr_in dst{};
@@ -307,8 +333,11 @@ int main(int argc, char** argv) {
       h.seq = seq;
       h.body_len = body_len;
 
-      if (!send_all(s, &h, sizeof(h))) return false;
-      if (body_len && !send_all(s, body, body_len)) return false;
+      std::vector<iovec> iov;
+      iov.reserve(body_len ? 2 : 1);
+      iov.push_back(iovec{&h, sizeof(h)});
+      if (body_len) iov.push_back(iovec{const_cast<void*>(body), body_len});
+      if (!sendmsg_full(s, iov)) return false;
 
       frames_sent += 1;
       bytes_sent_total += (std::uint64_t)sizeof(h) + (std::uint64_t)body_len;
@@ -334,19 +363,14 @@ int main(int argc, char** argv) {
       h.seq = seq;
       h.body_len = (std::uint32_t)(sizeof(StartBodyV2) + topic_len);
 
-      iovec iov[2];
-      iov[0].iov_base = &h;
-      iov[0].iov_len = sizeof(h);
-      iov[1].iov_base = (void*)(&sb);
-      iov[1].iov_len = sizeof(sb);
+      std::vector<iovec> iov;
+      iov.reserve(topic_len ? 3 : 2);
+      iov.push_back(iovec{&h, sizeof(h)});
+      iov.push_back(iovec{&sb, sizeof(sb)});
+      if (topic_len) iov.push_back(iovec{const_cast<char*>(topic.data()), topic_len});
 
-      if (::writev(s, iov, 2) != (ssize_t)(sizeof(h) + sizeof(sb))) {
-        std::cerr << "send start fixed part failed\n";
-        ::close(s);
-        return 1;
-      }
-      if (topic_len && !send_all(s, topic.data(), topic_len)) {
-        std::cerr << "send start topic failed\n";
+      if (!sendmsg_full(s, iov)) {
+        std::cerr << "send start failed\n";
         ::close(s);
         return 1;
       }
@@ -357,8 +381,8 @@ int main(int argc, char** argv) {
     }
 
     std::vector<std::uint8_t> payload;
-    std::vector<std::uint8_t> batch_buf;
-    batch_buf.reserve(4 * 1024 * 1024);
+    std::vector<RecEntryHdr> batch_hdrs;
+    std::vector<std::vector<std::uint8_t>> batch_payloads;
 
     std::uint64_t sent_records = 0;
 
@@ -368,9 +392,31 @@ int main(int argc, char** argv) {
 
     std::uint64_t send_wall_begin = mono_ns();
 
+    std::size_t batch_bytes_used = 0;
+    std::size_t batch_iov_used = 0;
+#ifndef IOV_MAX
+    const std::size_t max_iov = 1024;
+#else
+    const std::size_t max_iov = IOV_MAX;
+#endif
+    const std::size_t max_records_per_batch = (max_iov > 3) ? ((max_iov - 1) / 2) : 1;
+    const std::size_t kMinBatchBytes = 128 * 1024;
+    const std::size_t kMaxBatchBytes = 8 * 1024 * 1024;
+    double avg_payload_bytes = 0.0;
+    batch_hdrs.reserve(max_records_per_batch);
+    batch_payloads.reserve(max_records_per_batch);
+
+    auto target_batch_bytes_for = [&](double avg_bytes) -> std::size_t {
+      if (avg_bytes <= 0.0) return kMinBatchBytes;
+      double target = avg_bytes * 8.0 + 4096.0;
+      if (target < (double)kMinBatchBytes) target = (double)kMinBatchBytes;
+      if (target > (double)kMaxBatchBytes) target = (double)kMaxBatchBytes;
+      return (std::size_t)target;
+    };
+
     auto flush_batch = [&](bool force) -> bool {
-      if (!force && batch_buf.empty()) return true;
-      if (batch_buf.empty()) return true;
+      if (!force && batch_hdrs.empty()) return true;
+      if (batch_hdrs.empty()) return true;
 
       MsgHdr h{};
       h.magic = kMagic;
@@ -378,27 +424,30 @@ int main(int argc, char** argv) {
       h.type = kMsgRec;
       h.request_id = request_id;
       h.seq = seq;
-      h.body_len = (std::uint32_t)batch_buf.size();
+      h.body_len = (std::uint32_t)batch_bytes_used;
 
-      iovec iov[2];
-      iov[0].iov_base = &h;
-      iov[0].iov_len = sizeof(h);
-      iov[1].iov_base = batch_buf.data();
-      iov[1].iov_len = batch_buf.size();
+      std::vector<iovec> iov;
+      iov.reserve(1 + batch_iov_used);
+      iov.push_back(iovec{&h, sizeof(h)});
+      for (std::size_t i = 0; i < batch_hdrs.size(); ++i) {
+        iov.push_back(iovec{&batch_hdrs[i], sizeof(RecEntryHdr)});
+        if (!batch_payloads[i].empty()) {
+          iov.push_back(iovec{batch_payloads[i].data(), batch_payloads[i].size()});
+        }
+      }
 
-      ssize_t need = (ssize_t)(sizeof(h) + batch_buf.size());
-      ssize_t got = ::writev(s, iov, 2);
-      if (got != need) return false;
+      if (!sendmsg_full(s, iov)) return false;
 
       frames_sent += 1;
-      bytes_sent_total += (std::uint64_t)need;
+      bytes_sent_total += (std::uint64_t)sizeof(h) + (std::uint64_t)batch_bytes_used;
       seq += 1;
 
-      batch_buf.clear();
+      batch_hdrs.clear();
+      batch_payloads.clear();
+      batch_bytes_used = 0;
+      batch_iov_used = 0;
       return true;
     };
-
-    std::uint32_t in_batch = 0;
 
     for (const auto& r : refs) {
       if (max_records > 0 && sent_records >= max_records) break;
@@ -421,24 +470,40 @@ int main(int argc, char** argv) {
         continue;
       }
 
-      batch_buf.insert(batch_buf.end(),
-                       (std::uint8_t*)&eh,
-                       (std::uint8_t*)&eh + sizeof(eh));
-      if (!payload.empty()) {
-        batch_buf.insert(batch_buf.end(), payload.begin(), payload.end());
+      if (avg_payload_bytes <= 0.0) {
+        avg_payload_bytes = (double)payload.size();
+      } else {
+        avg_payload_bytes = 0.90 * avg_payload_bytes + 0.10 * (double)payload.size();
       }
+      std::size_t target_batch_bytes = target_batch_bytes_for(avg_payload_bytes);
 
-      records_sent_ok += 1;
-      payload_bytes_sent_ok += (std::uint64_t)payload.size();
-      sent_records += 1;
+      std::size_t record_iov = payload.empty() ? 1 : 2;
+      bool would_exceed = (!batch_hdrs.empty()) &&
+                          ((batch_hdrs.size() >= max_records_per_batch) ||
+                           (batch_bytes_used + need > target_batch_bytes) ||
+                           (1 + batch_iov_used + record_iov > max_iov));
 
-      in_batch += 1;
-      if (in_batch >= batch_records) {
+      if (would_exceed) {
         if (!flush_batch(true)) {
           std::cerr << "send batch failed\n";
           break;
         }
-        in_batch = 0;
+      }
+
+      batch_hdrs.push_back(eh);
+      batch_payloads.emplace_back(std::move(payload));
+      batch_bytes_used += need;
+      batch_iov_used += record_iov;
+
+      records_sent_ok += 1;
+      payload_bytes_sent_ok += (std::uint64_t)batch_payloads.back().size();
+      sent_records += 1;
+
+      if (batch_hdrs.size() >= max_records_per_batch || batch_bytes_used >= target_batch_bytes) {
+        if (!flush_batch(true)) {
+          std::cerr << "send batch failed\n";
+          break;
+        }
       }
     }
 
