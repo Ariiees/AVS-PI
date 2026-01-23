@@ -1,17 +1,8 @@
-# udp_offload_send.cpp 
-## Usage
+## Build
 ```
-udp_offload_send --dst_ip <ip> --dst_port <port>
-                --topic <sensor_topic> --start <ts_ns> --end <ts_ns>
-                [--ssd_root <path>] [--max_records <n>]
-                [--mtu_payload <bytes>] [--batch_us <us>]
+g++ -O2 -std=c++17 offload_sender_tcp_cloud_batch.cpp -o offload_sender_tcp_cloud_batch
 ```
-## Behavior
-Queries AVS via avs::RetrieveAPI for DataRef in [start,end] and streams payloads over UDP.
-
-Each UDP packet carries request id, packet seq, record count, then per record ts_ns and raw bytes.
-
-Packets are MTU safe by bounding payload size.
-
-## Output
-Prints sender summary metrics to stdout at the end.
+## Run
+```
+ros2 run avs offload <dst_ip> <dst_port> <start_ts_ns> <end_ts_ns> <topics_csv> <max_records> [runs]
+```

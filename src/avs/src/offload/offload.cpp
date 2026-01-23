@@ -1,18 +1,3 @@
-// offload_sender_tcp_cloud_batch.cpp
-// Build
-//   g++ -O2 -std=c++17 offload_sender_tcp_cloud_batch.cpp -o offload_sender_tcp_cloud_batch
-//
-// Run
-//   ros2 run avs offload <dst_ip> <dst_port> <start_ts_ns> <end_ts_ns> <topics_csv> <max_records> [runs]
-//
-// Behavior changes
-//   Topic is sent once in Start, per record topic bytes removed
-//   Records are batched into one kMsgRec frame with many entries
-//   One sendmsg per batch without copying payload bytes
-//   Dynamic batch size tuned from payload sizes (image/lidar/gps)
-//
-// Printed metrics remain compatible with your current parser output fields
-
 #include <arpa/inet.h>
 #include <cerrno>
 #include <climits>
