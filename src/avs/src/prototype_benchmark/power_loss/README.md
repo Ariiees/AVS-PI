@@ -34,12 +34,17 @@ Experiment logic:
   - Power cut interval = boot_time_after_reboot - last_heartbeat_before_reboot.
   - Recovery time = first_data_after_reboot - boot_time_after_reboot.
   - Data loss window = first_data_after_reboot - last_data_before_reboot.
-  - BER = corrupted_bytes / total_bytes from a hash sample of stable files.
+  - Estimated write rate (B/s) from directory size samples before reboot.
+  - Estimated lost bytes = write rate * data loss window.
+  - Storage health: SMART/NVMe logs before/after reboot + XFS read-only check.
 - Writes `power_loss_report.json` and `power_loss_report.txt`, then exits.
 
 Notes:
 - The reboot command defaults to `systemctl reboot`. Run as a user with permission.
 - Override launch with `--launch-file` and `--launch-args` if needed.
+- Storage metrics use `smartctl`, `nvme smart-log`, and `xfs_repair -n` on `/dev/nvme0n1p3` (override with `--device` and `--fs-type`).
+- If the filesystem is mounted, the XFS check is skipped and noted in the report.
+- The resume service runs as root to capture device metrics.
 - The resume script sources `/opt/ros/<distro>/setup.bash` and `/home/avs/AVS-PI/install/setup.bash` if present.
 - The resume service is safe to leave enabled; it exits if no active run exists.
 - Reports land under `/home/avs/Log/power_loss/<run_id>/`.

@@ -7,7 +7,7 @@ Behavior:
     a heartbeat plus newest data file time.
   - Persists state so a reboot can be detected.
   - After reboot, resumes, measures recovery time, data loss window, power cut interval,
-    and estimates bit error rate (BER) from a hash sample.
+    and records storage-level health metrics.
 
 Typical use:
   1) Start the experiment before power loss:
@@ -20,18 +20,21 @@ Typical use:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import signal
 import shlex
 import subprocess
+import sqlite3
+import struct
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 DEFAULT_DATA_ROOT = Path("/home/avs/DATA/SSD")
+DEFAULT_DEVICE = "/dev/nvme0n1p3"
+DEFAULT_FS_TYPE = "xfs"
 LOG_ROOT = Path("/home/avs/Log")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -104,108 +107,254 @@ def latest_file_stats(root: Path) -> Tuple[Optional[float], Optional[str], Optio
     return latest_mtime, latest_path, latest_size
 
 
-def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
+TRIP_INDEX_STRUCT = struct.Struct("<qqQII")
 
 
-def build_hash_sample(
-    root: Path,
-    sample_count: int,
-    max_bytes: int,
-    stable_seconds: int,
-) -> List[Dict]:
-    if not root.exists() or sample_count <= 0:
-        return []
+def read_trip_idx_summary(idx_path: Path) -> Optional[Tuple[int, int]]:
+    try:
+        with idx_path.open("rb") as f:
+            total_records = 0
+            last_end_ts = None
+            while True:
+                buf = f.read(TRIP_INDEX_STRUCT.size)
+                if len(buf) < TRIP_INDEX_STRUCT.size:
+                    break
+                _, end_ts_ns, _, _, record_count = TRIP_INDEX_STRUCT.unpack(buf)
+                total_records += int(record_count)
+                last_end_ts = int(end_ts_ns)
+    except Exception:
+        return None
+    if last_end_ts is None:
+        return None
+    return last_end_ts, total_records
 
-    cutoff = time.time() - stable_seconds
-    heap: List[Tuple[float, str, int]] = []
 
-    for dirpath, _, filenames in os.walk(root):
-        for name in filenames:
-            path = os.path.join(dirpath, name)
-            try:
-                st = os.stat(path, follow_symlinks=False)
-            except (FileNotFoundError, PermissionError):
-                continue
-            if st.st_size > max_bytes:
-                continue
-            if st.st_mtime > cutoff:
-                continue
-            heap.append((st.st_mtime, path, st.st_size))
+def recover_global_sqlite(data_root: Path) -> Dict:
+    start = time.time()
+    db_path = data_root / "global.sqlite3"
+    if not db_path.exists():
+        return {
+            "db_path": str(db_path),
+            "status": "missing",
+            "checked_rows": 0,
+            "recovered_rows": 0,
+            "missing_idx": 0,
+            "duration_sec": time.time() - start,
+        }
 
-    heap.sort(reverse=True)
-    selected = heap[:sample_count]
-
-    out = []
-    for mtime, path, size in selected:
-        p = Path(path)
-        try:
-            sha = sha256_file(p)
-        except Exception:
-            continue
-        out.append(
-            {
-                "path": str(p),
-                "size": size,
-                "mtime": mtime,
-                "sha256": sha,
-            }
+    recovered = 0
+    checked = 0
+    missing_idx = 0
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=3.0)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT sensor_topic, topic_folder, day, trip_id, end_ts_ns, number_of_records "
+            "FROM global "
+            "WHERE end_ts_ns IS NULL OR end_ts_ns = '' OR end_ts_ns = '0' OR number_of_records = 0;"
         )
+        rows = cur.fetchall()
+        for row in rows:
+            checked += 1
+            topic_folder = row["topic_folder"]
+            day = row["day"]
+            trip_id = int(row["trip_id"])
+            idx_path = data_root / topic_folder / day / f"trip_{trip_id:02d}.idx"
+            summary = read_trip_idx_summary(idx_path)
+            if not summary:
+                missing_idx += 1
+                continue
+            end_ts_ns, record_count = summary
+            if end_ts_ns == 0 and record_count == 0:
+                continue
+            cur.execute(
+                "UPDATE global SET end_ts_ns = ?, number_of_records = ? "
+                "WHERE sensor_topic = ? AND day = ? AND trip_id = ?;",
+                (str(end_ts_ns), int(record_count), row["sensor_topic"], day, trip_id),
+            )
+            recovered += 1
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        return {
+            "db_path": str(db_path),
+            "status": f"error: {exc}",
+            "checked_rows": checked,
+            "recovered_rows": recovered,
+            "missing_idx": missing_idx,
+            "duration_sec": time.time() - start,
+        }
+
+    return {
+        "db_path": str(db_path),
+        "status": "ok",
+        "checked_rows": checked,
+        "recovered_rows": recovered,
+        "missing_idx": missing_idx,
+        "duration_sec": time.time() - start,
+    }
+
+
+def run_cmd(cmd: List[str], timeout: float = 10.0) -> Dict:
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+            text=True,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "cmd": cmd}
+    return {
+        "ok": result.returncode == 0,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "cmd": cmd,
+    }
+
+
+def run_cmd_maybe_sudo(cmd: List[str], timeout: float = 10.0, allow_sudo: bool = True) -> Dict:
+    result = run_cmd(cmd, timeout=timeout)
+    if result.get("ok"):
+        return result
+    if not allow_sudo:
+        return result
+    err = (result.get("stderr") or "") + (result.get("error") or "")
+    if "Permission denied" in err or "permission denied" in err:
+        sudo_cmd = ["sudo", "-n"] + cmd
+        sudo_res = run_cmd(sudo_cmd, timeout=timeout)
+        sudo_res["sudo_attempted"] = True
+        return sudo_res
+    return result
+
+
+def nvme_base_device(device: str) -> str:
+    if "nvme" in device and "p" in device:
+        base = device.rsplit("p", 1)[0]
+        if base:
+            return base
+    return device
+
+
+def parse_nvme_smart(text: str) -> Dict:
+    out = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip().lower().replace(" ", "_")
+        val = val.strip().split()[0]
+        if val.isdigit():
+            out[key] = int(val)
+        else:
+            out[key] = val
     return out
 
 
-def verify_hash_sample(sample: List[Dict]) -> Dict:
-    total_bytes = 0
-    corrupted_bytes = 0
-    missing = []
-    mismatched = []
-    verified = []
+def parse_smartctl(text: str) -> Dict:
+    out = {}
+    for line in text.splitlines():
+        if "Power Cycles" in line:
+            out["power_cycles"] = line.split()[-1]
+        elif "Power On Hours" in line:
+            out["power_on_hours"] = line.split()[-1]
+        elif "Unsafe Shutdowns" in line:
+            out["unsafe_shutdowns"] = line.split()[-1]
+        elif "Media and Data Integrity Errors" in line:
+            out["media_errors"] = line.split()[-1]
+        elif "Error Information Log Entries" in line:
+            out["error_log_entries"] = line.split()[-1]
+    return out
 
-    for item in sample:
-        path = Path(item.get("path", ""))
-        if not path.exists():
-            missing.append(str(path))
-            continue
-        try:
-            st = path.stat()
-        except (FileNotFoundError, PermissionError):
-            missing.append(str(path))
-            continue
-        try:
-            sha = sha256_file(path)
-        except Exception:
-            mismatched.append(str(path))
-            corrupted_bytes += st.st_size
-            total_bytes += st.st_size
-            continue
 
-        total_bytes += st.st_size
-        if sha != item.get("sha256") or st.st_size != item.get("size"):
-            mismatched.append(str(path))
-            corrupted_bytes += st.st_size
-        else:
-            verified.append(str(path))
+def snapshot_storage_metrics(device: str, allow_sudo: bool) -> Dict:
+    metrics = {"device": device}
+    smart = run_cmd_maybe_sudo(["smartctl", "--all", device], timeout=20.0, allow_sudo=allow_sudo)
+    if smart.get("ok"):
+        metrics["smartctl"] = parse_smartctl(smart.get("stdout", ""))
+    else:
+        metrics["smartctl_error"] = smart.get("stderr") or smart.get("error")
 
-    ber = None
-    if total_bytes > 0:
-        ber = corrupted_bytes / float(total_bytes)
+    base = nvme_base_device(device)
+    nvme_smart = run_cmd_maybe_sudo(["nvme", "smart-log", base], timeout=20.0, allow_sudo=allow_sudo)
+    if nvme_smart.get("ok"):
+        metrics["nvme_smart"] = parse_nvme_smart(nvme_smart.get("stdout", ""))
+    else:
+        metrics["nvme_smart_error"] = nvme_smart.get("stderr") or nvme_smart.get("error")
 
+    nvme_err = run_cmd_maybe_sudo(["nvme", "error-log", base], timeout=20.0, allow_sudo=allow_sudo)
+    if nvme_err.get("ok"):
+        metrics["nvme_error_log"] = nvme_err.get("stdout", "")
+    else:
+        metrics["nvme_error_log_error"] = nvme_err.get("stderr") or nvme_err.get("error")
+
+    return metrics
+
+
+def xfs_check(device: str, allow_sudo: bool) -> Dict:
+    mounts = run_cmd(["mount"], timeout=5.0)
+    if device in (mounts.get("stdout") or ""):
+        return {"ok": False, "skipped": True, "reason": "device is mounted"}
+
+    result = run_cmd_maybe_sudo(["xfs_repair", "-n", device], timeout=60.0, allow_sudo=allow_sudo)
     return {
-        "total_bytes": total_bytes,
-        "corrupted_bytes": corrupted_bytes,
-        "bit_error_rate": ber,
-        "missing_files": missing,
-        "mismatched_files": mismatched,
-        "verified_files": verified,
+        "ok": result.get("ok", False),
+        "skipped": False,
+        "returncode": result.get("returncode"),
+        "stderr": (result.get("stderr") or "").strip(),
+        "stdout_tail": "\n".join((result.get("stdout") or "").splitlines()[-10:]),
     }
 
+
+def dir_size_bytes(root: Path) -> int:
+    total = 0
+    if not root.exists():
+        return 0
+    for p in root.rglob("*"):
+        if p.is_file():
+            try:
+                total += p.stat().st_size
+            except FileNotFoundError:
+                pass
+    return total
+
+
+def estimate_write_rate(samples: List[Dict]) -> Optional[float]:
+    if len(samples) < 2:
+        return None
+    first = samples[0]
+    last = samples[-1]
+    dt = last["t"] - first["t"]
+    if dt <= 0:
+        return None
+    return (last["size"] - first["size"]) / dt
+
+
+def summarize_storage(metrics: Optional[Dict]) -> Optional[Dict]:
+    if not metrics:
+        return None
+    summary = {"device": metrics.get("device")}
+    smart = metrics.get("smartctl") or {}
+    nvme = metrics.get("nvme_smart") or {}
+    for key in ("unsafe_shutdowns", "media_errors", "num_err_log_entries", "power_cycles", "power_on_hours"):
+        val = nvme.get(key)
+        if val is not None:
+            summary[key] = val
+    for key in ("media_errors", "error_log_entries", "power_cycles", "power_on_hours"):
+        val = smart.get(key)
+        if val is not None:
+            summary[f"smart_{key}"] = val
+    if metrics.get("smartctl_error"):
+        summary["smartctl_error"] = metrics.get("smartctl_error")
+    if metrics.get("nvme_smart_error"):
+        summary["nvme_smart_error"] = metrics.get("nvme_smart_error")
+    if metrics.get("nvme_error_log_error"):
+        summary["nvme_error_log_error"] = metrics.get("nvme_error_log_error")
+    return summary
 
 def build_launch_command(args: argparse.Namespace) -> List[str]:
     cmd = [
@@ -220,24 +369,14 @@ def build_launch_command(args: argparse.Namespace) -> List[str]:
     return cmd
 
 
-def issue_reboot(command: str, timeout: float) -> Tuple[bool, Optional[str]]:
+def issue_reboot(command: str, timeout: float, allow_sudo: bool) -> Tuple[bool, Optional[str]]:
     if not command:
         return False, "reboot command is empty"
-    try:
-        result = subprocess.run(
-            shlex.split(command),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-            text=True,
-        )
-    except Exception as exc:
-        return False, str(exc)
-
-    if result.returncode != 0:
-        err = result.stderr.strip() or result.stdout.strip()
-        return False, err or f"reboot command failed with code {result.returncode}"
+    cmd = shlex.split(command)
+    result = run_cmd_maybe_sudo(cmd, timeout=timeout, allow_sudo=allow_sudo)
+    if not result.get("ok"):
+        err = (result.get("stderr") or "").strip() or (result.get("error") or "").strip()
+        return False, err or f"reboot command failed with code {result.get('returncode')}"
     return True, None
 
 
@@ -319,12 +458,9 @@ def init_state(args: argparse.Namespace, run_dir: Path) -> Dict:
     boot_time = read_boot_time_epoch()
     now = time.time()
     data_mtime, data_path, data_size = latest_file_stats(args.data_root)
-    hash_sample = build_hash_sample(
-        args.data_root,
-        args.hash_sample,
-        args.hash_max_mib * 1024 * 1024,
-        args.hash_stable_seconds,
-    )
+    size_now = dir_size_bytes(args.data_root)
+    size_samples = [{"t": now, "size": size_now}]
+    pre_storage = snapshot_storage_metrics(args.device, args.allow_storage_sudo) if args.capture_storage_metrics else None
 
     return {
         "run_id": run_dir.name,
@@ -341,9 +477,8 @@ def init_state(args: argparse.Namespace, run_dir: Path) -> Dict:
         "last_data_iso": now_iso(data_mtime) if data_mtime else None,
         "last_data_path": data_path,
         "last_data_size": data_size,
-        "hash_sample_epoch": now if hash_sample else None,
-        "hash_sample_iso": now_iso(now) if hash_sample else None,
-        "hash_sample": hash_sample,
+        "size_samples": size_samples,
+        "pre_storage": pre_storage,
         "ingest_cmd": build_launch_command(args),
         "auto_reboot_after_sec": args.auto_reboot_after,
         "reboot_command": args.reboot_command,
@@ -362,7 +497,7 @@ def monitor_run(
 ) -> None:
     state_path = run_dir / STATE_FILE
     start_epoch = state.get("start_epoch", time.time())
-    next_hash_epoch = time.time() + args.hash_interval if args.hash_interval > 0 else None
+    next_size_epoch = time.time() + args.size_sample_interval if args.size_sample_interval > 0 else None
 
     while True:
         now = time.time()
@@ -379,7 +514,7 @@ def monitor_run(
                 state["reboot_requested_epoch"] = now
                 state["reboot_requested_iso"] = now_iso(now)
                 update_state(state_path, state)
-                ok, err = issue_reboot(args.reboot_command, args.reboot_command_timeout)
+                ok, err = issue_reboot(args.reboot_command, args.reboot_command_timeout, args.allow_reboot_sudo)
                 if not ok:
                     state["status"] = "reboot_failed"
                     state["reboot_error"] = err
@@ -406,18 +541,14 @@ def monitor_run(
         state["last_heartbeat_epoch"] = now
         state["last_heartbeat_iso"] = now_iso(now)
 
-        if next_hash_epoch and now >= next_hash_epoch:
-            sample = build_hash_sample(
-                args.data_root,
-                args.hash_sample,
-                args.hash_max_mib * 1024 * 1024,
-                args.hash_stable_seconds,
-            )
-            if sample:
-                state["hash_sample"] = sample
-                state["hash_sample_epoch"] = now
-                state["hash_sample_iso"] = now_iso(now)
-            next_hash_epoch = now + args.hash_interval
+        if next_size_epoch and now >= next_size_epoch:
+            size_now = dir_size_bytes(args.data_root)
+            samples = state.get("size_samples", [])
+            samples.append({"t": now, "size": size_now})
+            if args.size_sample_max > 0 and len(samples) > args.size_sample_max:
+                samples = samples[-args.size_sample_max :]
+            state["size_samples"] = samples
+            next_size_epoch = now + args.size_sample_interval
 
         update_state(state_path, state)
         time.sleep(args.scan_interval)
@@ -430,12 +561,14 @@ def wait_for_new_data(
     last_mtime: Optional[float],
     scan_interval: float,
     timeout: float,
+    min_epoch: Optional[float] = None,
 ) -> Tuple[Optional[float], Optional[str], Optional[int]]:
     start = time.time()
     while True:
         data_mtime, data_path, data_size = latest_file_stats(data_root)
         if data_mtime is not None and (last_mtime is None or data_mtime > last_mtime):
-            return data_mtime, data_path, data_size
+            if min_epoch is None or data_mtime >= min_epoch:
+                return data_mtime, data_path, data_size
         if timeout > 0 and time.time() - start > timeout:
             return None, None, None
         time.sleep(scan_interval)
@@ -443,6 +576,15 @@ def wait_for_new_data(
 
 def write_report(run_dir: Path, report: Dict) -> None:
     write_json_atomic(run_dir / REPORT_JSON, report)
+    storage_pre = summarize_storage(report.get("storage_metrics_pre"))
+    storage_post = summarize_storage(report.get("storage_metrics_post"))
+    fs_check = report.get("filesystem_check") or {}
+    fs_check_summary = None
+    if fs_check:
+        if fs_check.get("skipped"):
+            fs_check_summary = f"skipped ({fs_check.get('reason')})"
+        else:
+            fs_check_summary = "ok" if fs_check.get("ok") else f"error (rc={fs_check.get('returncode')})"
     lines = [
         "Power Loss Experiment Report",
         f"Run ID: {report.get('run_id')}",
@@ -451,13 +593,13 @@ def write_report(run_dir: Path, report: Dict) -> None:
         f"Power Cut Interval (s): {report.get('power_cut_interval_sec')}",
         f"Recovery Time (s): {report.get('recovery_time_sec')}",
         f"Data Loss Window (s): {report.get('data_loss_window_sec')}",
+        f"Estimated Write Rate (B/s): {report.get('estimated_write_rate_bytes_per_sec')}",
+        f"Estimated Lost Bytes: {report.get('estimated_lost_bytes')}",
         f"Last Data Before: {report.get('last_data_before_iso')} {report.get('last_data_before_path')}",
         f"First Data After: {report.get('first_data_after_iso')} {report.get('first_data_after_path')}",
-        f"Bit Error Rate: {report.get('bit_error_rate')}",
-        f"BER Corrupted Bytes: {report.get('corrupted_bytes')}",
-        f"BER Total Bytes: {report.get('total_bytes')}",
-        f"Missing Files: {len(report.get('missing_files', []))}",
-        f"Mismatched Files: {len(report.get('mismatched_files', []))}",
+        f"Storage Metrics (pre): {storage_pre}",
+        f"Storage Metrics (post): {storage_post}",
+        f"Filesystem Check: {fs_check_summary}",
         f"Notes: {report.get('notes')}",
     ]
     (run_dir / REPORT_TXT).write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -471,22 +613,29 @@ def resume_after_reboot(args: argparse.Namespace, run_dir: Path, state: Dict) ->
     if boot_time and state.get("last_heartbeat_epoch"):
         power_cut_interval = boot_time - state["last_heartbeat_epoch"]
 
+    post_storage = snapshot_storage_metrics(args.device, args.allow_storage_sudo) if args.capture_storage_metrics else None
+    fs_check = xfs_check(args.device, args.allow_storage_sudo) if args.fs_type == "xfs" else None
+
     avs_proc = start_ingest_launch(args, run_dir)
     last_before = state.get("last_data_mtime")
 
     first_after_mtime, first_after_path, first_after_size = wait_for_new_data(
-        args.data_root, last_before, args.scan_interval, args.recovery_timeout
+        args.data_root, last_before, args.scan_interval, args.recovery_timeout, min_epoch=boot_time
     )
 
     recovery_time = None
-    if boot_time and first_after_mtime:
+    if boot_time and first_after_mtime and first_after_mtime >= boot_time:
         recovery_time = first_after_mtime - boot_time
 
     data_loss_window = None
-    if last_before and first_after_mtime:
+    if last_before and first_after_mtime and first_after_mtime >= last_before:
         data_loss_window = first_after_mtime - last_before
 
-    ber_report = verify_hash_sample(state.get("hash_sample", []))
+    size_samples = state.get("size_samples", [])
+    write_rate = estimate_write_rate(size_samples)
+    lost_bytes = None
+    if write_rate is not None and data_loss_window is not None:
+        lost_bytes = max(0.0, write_rate * data_loss_window)
 
     report = {
         "run_id": state.get("run_id"),
@@ -499,20 +648,24 @@ def resume_after_reboot(args: argparse.Namespace, run_dir: Path, state: Dict) ->
         "power_cut_interval_sec": power_cut_interval,
         "recovery_time_sec": recovery_time,
         "data_loss_window_sec": data_loss_window,
+        "estimated_write_rate_bytes_per_sec": write_rate,
+        "estimated_lost_bytes": lost_bytes,
         "last_data_before_epoch": last_before,
         "last_data_before_iso": now_iso(last_before) if last_before else None,
         "last_data_before_path": state.get("last_data_path"),
         "first_data_after_epoch": first_after_mtime,
         "first_data_after_iso": now_iso(first_after_mtime) if first_after_mtime else None,
         "first_data_after_path": first_after_path,
-        "bit_error_rate": ber_report.get("bit_error_rate"),
-        "corrupted_bytes": ber_report.get("corrupted_bytes"),
-        "total_bytes": ber_report.get("total_bytes"),
-        "missing_files": ber_report.get("missing_files"),
-        "mismatched_files": ber_report.get("mismatched_files"),
-        "verified_files": ber_report.get("verified_files"),
+        "storage_metrics_pre": state.get("pre_storage"),
+        "storage_metrics_post": post_storage,
+        "filesystem_check": fs_check,
         "notes": None if first_after_mtime else "Recovery timeout: no new data detected",
     }
+    if first_after_mtime and boot_time and first_after_mtime < boot_time:
+        report["notes"] = (
+            (report["notes"] + "; " if report["notes"] else "")
+            + "First data timestamp precedes reboot; check system clock or file mtimes"
+        )
 
     state["status"] = "completed"
     state["recovery_report"] = report
@@ -531,16 +684,19 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--scan-interval", type=float, default=2.0)
     ap.add_argument("--max-runtime", type=float, default=0.0, help="0 means no limit")
     ap.add_argument("--recovery-timeout", type=float, default=600.0)
-    ap.add_argument("--hash-sample", type=int, default=20)
-    ap.add_argument("--hash-max-mib", type=int, default=512)
-    ap.add_argument("--hash-stable-seconds", type=int, default=120)
-    ap.add_argument("--hash-interval", type=float, default=300.0)
+    ap.add_argument("--device", default=DEFAULT_DEVICE)
+    ap.add_argument("--fs-type", default=DEFAULT_FS_TYPE)
+    ap.add_argument("--size-sample-interval", type=float, default=10.0)
+    ap.add_argument("--size-sample-max", type=int, default=30)
+    ap.add_argument("--no-capture-storage-metrics", action="store_false", dest="capture_storage_metrics", default=True)
+    ap.add_argument("--no-storage-sudo", action="store_false", dest="allow_storage_sudo", default=True)
     ap.add_argument("--start-new", action="store_true")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--leave-avs-running", action="store_true")
     ap.add_argument("--auto-reboot-after", type=float, default=0.0)
     ap.add_argument("--reboot-command", default="systemctl reboot")
     ap.add_argument("--reboot-command-timeout", type=float, default=10.0)
+    ap.add_argument("--no-reboot-sudo", action="store_false", dest="allow_reboot_sudo", default=True)
 
     ap.add_argument("--launch-package", default="avs")
     ap.add_argument("--launch-file", default="avs_store.launch.py")

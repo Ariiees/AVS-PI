@@ -11,11 +11,46 @@ namespace fs = std::filesystem;
 
 namespace avs {
 
+namespace {
+
+bool ReadTripIndexSummary(const fs::path &idx_path, uint64_t *end_ts_ns, uint64_t *record_count)
+{
+  if (!end_ts_ns || !record_count) return false;
+  std::ifstream idx(idx_path, std::ios::binary);
+  if (!idx.is_open()) return false;
+
+  TripIndexEntry tie;
+  bool any = false;
+  uint64_t total_records = 0;
+  int64_t last_end_ts = 0;
+
+  while (true) {
+    idx.read(reinterpret_cast<char*>(&tie), sizeof(tie));
+    if (!idx) {
+      if (idx.gcount() != 0) {
+        // Ignore trailing partial record after a power loss.
+      }
+      break;
+    }
+    any = true;
+    total_records += static_cast<uint64_t>(tie.record_count);
+    last_end_ts = tie.end_ts_ns;
+  }
+
+  if (!any) return false;
+  *end_ts_ns = static_cast<uint64_t>(last_end_ts);
+  *record_count = total_records;
+  return true;
+}
+
+} // namespace
+
 AppendLogger::AppendLogger(const std::string &ssd_root, const std::string &topic)
   : ssd_root_(ssd_root), topic_(topic)
 {
   openGlobalDB();
   ensureGlobalSchema();
+  recoverGlobalRows();
 }
 
 AppendLogger::~AppendLogger()
@@ -61,6 +96,53 @@ void AppendLogger::ensureGlobalSchema()
     sqlite3_free(errmsg);
     throw std::runtime_error("Failed to create global schema: " + e);
   }
+}
+
+void AppendLogger::recoverGlobalRows()
+{
+  const char *sql =
+    "SELECT topic_folder, day, trip_id "
+    "FROM global "
+    "WHERE sensor_topic = ? AND (end_ts_ns = '0' OR number_of_records = 0);";
+
+  sqlite3_stmt *stmt = nullptr;
+  int rc = sqlite3_prepare_v2(ssd_db_, sql, -1, &stmt, nullptr);
+  if (rc != SQLITE_OK) {
+    std::cerr << "[WARN] sqlite3_prepare_v2 failed (recovery)\n";
+    return;
+  }
+
+  sqlite3_bind_text(stmt, 1, topic_.c_str(), -1, SQLITE_TRANSIENT);
+
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    const unsigned char *topic_folder = sqlite3_column_text(stmt, 0);
+    const unsigned char *day = sqlite3_column_text(stmt, 1);
+    int trip_id = sqlite3_column_int(stmt, 2);
+
+    if (!topic_folder || !day) continue;
+
+    fs::path idx_path = fs::path(ssd_root_) / reinterpret_cast<const char*>(topic_folder)
+                        / reinterpret_cast<const char*>(day);
+    char tb[64];
+    snprintf(tb, sizeof(tb), "trip_%02d.idx", trip_id);
+    idx_path /= tb;
+
+    uint64_t end_ts_ns = 0;
+    uint64_t record_count = 0;
+    if (!ReadTripIndexSummary(idx_path, &end_ts_ns, &record_count)) {
+      continue;
+    }
+    if (end_ts_ns == 0 && record_count == 0) {
+      continue;
+    }
+    try {
+      updateGlobalRowEnd(reinterpret_cast<const char*>(day), trip_id, end_ts_ns, record_count);
+    } catch (const std::exception &e) {
+      std::cerr << "[WARN] recovery update failed: " << e.what() << "\n";
+    }
+  }
+
+  sqlite3_finalize(stmt);
 }
 
 void AppendLogger::insertGlobalRow(
