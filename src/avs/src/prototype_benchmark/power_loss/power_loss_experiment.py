@@ -4,10 +4,10 @@ Power loss + recovery experiment runner for AVS ingestion.
 
 Behavior:
   - Starts a ROS 2 launch file (default: avs_store.launch.py) and periodically records
-    a heartbeat plus newest data file time.
+    a heartbeat plus newest data file time (excluding global.sqlite3).
   - Persists state so a reboot can be detected.
   - After reboot, resumes, measures recovery time, data loss window, power cut interval,
-    and records storage-level health metrics.
+    and validates durability via CRC + sqlite recovery.
 
 Typical use:
   1) Start the experiment before power loss:
@@ -24,6 +24,8 @@ import json
 import os
 import signal
 import shlex
+import sqlite3
+import struct
 import subprocess
 import zlib
 import time
@@ -83,7 +85,7 @@ def load_json(path: Path) -> Optional[Dict]:
         return None
 
 
-def latest_file_stats(root: Path) -> Tuple[Optional[float], Optional[str], Optional[int]]:
+def latest_data_stats(root: Path) -> Tuple[Optional[float], Optional[str], Optional[int]]:
     if not root.exists():
         return None, None, None
     latest_mtime = None
@@ -91,6 +93,8 @@ def latest_file_stats(root: Path) -> Tuple[Optional[float], Optional[str], Optio
     latest_size = None
     for dirpath, _, filenames in os.walk(root):
         for name in filenames:
+            if name == "global.sqlite3":
+                continue
             path = os.path.join(dirpath, name)
             try:
                 st = os.stat(path, follow_symlinks=False)
@@ -116,6 +120,111 @@ def crc32_file(path: Path, chunk_size: int = 1024 * 1024) -> Optional[int]:
         return crc & 0xFFFFFFFF
     except Exception:
         return None
+
+
+TRIP_INDEX_STRUCT = struct.Struct("<qqQII")
+
+
+def find_trip_idx(day_dir: Path, trip_id: int) -> Optional[Path]:
+    if not day_dir.exists():
+        return None
+    for p in day_dir.glob("trip_*.idx"):
+        name = p.name
+        if not (name.startswith("trip_") and name.endswith(".idx")):
+            continue
+        num_str = name[len("trip_") : -len(".idx")]
+        if not num_str.isdigit():
+            continue
+        if int(num_str) == trip_id:
+            return p
+    return None
+
+
+def read_trip_idx_summary(idx_path: Path) -> Optional[Tuple[int, int]]:
+    try:
+        with idx_path.open("rb") as f:
+            total_records = 0
+            last_end_ts = None
+            while True:
+                buf = f.read(TRIP_INDEX_STRUCT.size)
+                if len(buf) < TRIP_INDEX_STRUCT.size:
+                    break
+                _, end_ts_ns, _, _, record_count = TRIP_INDEX_STRUCT.unpack(buf)
+                total_records += int(record_count)
+                last_end_ts = int(end_ts_ns)
+    except Exception:
+        return None
+    if last_end_ts is None:
+        return None
+    return last_end_ts, total_records
+
+
+def recover_global_sqlite(data_root: Path) -> Dict:
+    start = time.time()
+    db_path = data_root / "global.sqlite3"
+    if not db_path.exists():
+        return {
+            "db_path": str(db_path),
+            "status": "missing",
+            "checked_rows": 0,
+            "recovered_rows": 0,
+            "missing_idx": 0,
+            "duration_sec": time.time() - start,
+        }
+
+    recovered = 0
+    checked = 0
+    missing_idx = 0
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=3.0)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT sensor_topic, topic_folder, day, trip_id, end_ts_ns, number_of_records "
+            "FROM global "
+            "WHERE end_ts_ns IS NULL OR end_ts_ns = '' OR end_ts_ns = '0' OR number_of_records = 0;"
+        )
+        rows = cur.fetchall()
+        for row in rows:
+            checked += 1
+            topic_folder = row["topic_folder"]
+            day = row["day"]
+            trip_id = int(row["trip_id"])
+            day_dir = data_root / topic_folder / day
+            idx_path = find_trip_idx(day_dir, trip_id)
+            summary = read_trip_idx_summary(idx_path) if idx_path else None
+            if not summary:
+                missing_idx += 1
+                continue
+            end_ts_ns, record_count = summary
+            if end_ts_ns == 0 and record_count == 0:
+                continue
+            cur.execute(
+                "UPDATE global SET end_ts_ns = ?, number_of_records = ? "
+                "WHERE sensor_topic = ? AND day = ? AND trip_id = ?;",
+                (str(end_ts_ns), int(record_count), row["sensor_topic"], day, trip_id),
+            )
+            recovered += 1
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        return {
+            "db_path": str(db_path),
+            "status": f"error: {exc}",
+            "checked_rows": checked,
+            "recovered_rows": recovered,
+            "missing_idx": missing_idx,
+            "duration_sec": time.time() - start,
+        }
+
+    return {
+        "db_path": str(db_path),
+        "status": "ok",
+        "checked_rows": checked,
+        "recovered_rows": recovered,
+        "missing_idx": missing_idx,
+        "duration_sec": time.time() - start,
+    }
 
 
 
@@ -276,7 +385,7 @@ def init_state(args: argparse.Namespace, run_dir: Path) -> Dict:
     boot_id = read_boot_id()
     boot_time = read_boot_time_epoch()
     now = time.time()
-    data_mtime, data_path, data_size = latest_file_stats(args.data_root)
+    data_mtime, data_path, data_size = latest_data_stats(args.data_root)
     crc_pre = None
     if data_path:
         p = Path(data_path)
@@ -357,7 +466,7 @@ def monitor_run(
                 state["status"] = "stopped_ingest_exit"
                 break
 
-        data_mtime, data_path, data_size = latest_file_stats(args.data_root)
+        data_mtime, data_path, data_size = latest_data_stats(args.data_root)
         if data_mtime and (state.get("last_data_mtime") is None or data_mtime > state["last_data_mtime"]):
             state["last_data_mtime"] = data_mtime
             state["last_data_iso"] = now_iso(data_mtime)
@@ -391,7 +500,7 @@ def wait_for_new_data(
 ) -> Tuple[Optional[float], Optional[str], Optional[int]]:
     start = time.time()
     while True:
-        data_mtime, data_path, data_size = latest_file_stats(data_root)
+        data_mtime, data_path, data_size = latest_data_stats(data_root)
         if data_mtime is not None and (last_mtime is None or data_mtime > last_mtime):
             if min_epoch is None or data_mtime >= min_epoch:
                 return data_mtime, data_path, data_size
@@ -415,6 +524,7 @@ def write_report(run_dir: Path, report: Dict) -> None:
         f"Last durable record before crash: {report.get('last_data_before_iso')} {report.get('last_data_before_path')}",
         f"First recovered valid record after reboot: {report.get('first_data_after_iso')} {report.get('first_data_after_path')}",
         f"CRC validation summary: {report.get('crc_validation_summary')}",
+        f"SQLite recovery: {report.get('sqlite_recovery')}",
         f"Notes: {report.get('notes')}",
     ]
     (run_dir / REPORT_TXT).write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -428,6 +538,8 @@ def resume_after_reboot(args: argparse.Namespace, run_dir: Path, state: Dict) ->
     if boot_time and state.get("last_heartbeat_epoch"):
         power_cut_interval = boot_time - state["last_heartbeat_epoch"]
 
+
+    sqlite_recovery = recover_global_sqlite(args.data_root)
 
     avs_proc = start_ingest_launch(args, run_dir)
     last_before = state.get("last_data_mtime")
@@ -484,6 +596,7 @@ def resume_after_reboot(args: argparse.Namespace, run_dir: Path, state: Dict) ->
         "first_data_after_iso": now_iso(first_after_mtime) if first_after_mtime else None,
         "first_data_after_path": first_after_path,
         "crc_validation_summary": crc_summary,
+        "sqlite_recovery": sqlite_recovery,
         "notes": None if first_after_mtime else "Recovery timeout: no new data detected",
     }
     if first_after_mtime and boot_time and first_after_mtime < boot_time:

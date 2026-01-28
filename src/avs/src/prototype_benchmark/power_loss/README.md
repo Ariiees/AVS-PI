@@ -27,7 +27,7 @@ sudo systemctl disable power_loss_autorun.service
 
 Experiment logic:
 - Creates a new run dir under `/home/avs/Log/power_loss/<run_id>/` and records `state.json`.
-- Starts `ros2 launch avs avs_store.launch.py` and samples a heartbeat plus latest data mtime/path under `/home/avs/DATA/SSD`.
+- Starts `ros2 launch avs avs_store.launch.py` and samples a heartbeat plus latest data mtime/path under `/home/avs/DATA/SSD` (excluding `global.sqlite3`).
 - After 60s, issues a reboot and leaves the run marked as active.
 - On next boot, the resume service detects the reboot (boot_id change), restarts ingestion, and waits for new data.
 - Metrics are computed as:
@@ -39,6 +39,7 @@ Experiment logic:
   - Last durable record before crash = last file mtime/path before reboot.
   - First recovered valid record after reboot = first file mtime/path after reboot.
   - CRC validation summary = CRC32 comparison of last durable file before/after reboot (if file size <= `--crc-max-mib`).
+  - SQLite recovery = rebuilds missing `end_ts_ns`/`number_of_records` from `.idx` after reboot.
 - Writes `power_loss_report.json` and `power_loss_report.txt`, then exits.
 
 Notes:
