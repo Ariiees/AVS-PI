@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <sstream>
 #include <cctype>
+#include <sqlite3.h>
+#include <cstdlib>
 
 namespace fs = std::filesystem;
 
@@ -56,6 +58,50 @@ int TripManager::GetTripId(const std::string& day_path)
     it->second = id + 1;
     return id;
   }
+
+  // // Resume only when explicitly requested (e.g., power-loss recovery).
+  // const char* resume_env = std::getenv("AVS_RESUME_TRIP");
+  // if (resume_env && std::string(resume_env) == "1") {
+  //   try {
+  //   fs::path dayp(day_path);
+  //   if (dayp.has_parent_path()) {
+  //     std::string day = dayp.filename().string();
+  //     std::string topic_folder = dayp.parent_path().filename().string();
+  //     fs::path ssd_root = dayp.parent_path().parent_path();
+  //     fs::path db_path = ssd_root / "global.sqlite3";
+  //     if (fs::exists(db_path)) {
+  //       sqlite3* db = nullptr;
+  //       if (sqlite3_open(db_path.string().c_str(), &db) == SQLITE_OK) {
+  //         const char* sql =
+  //             "SELECT trip_id, end_ts_ns, number_of_records "
+  //             "FROM global WHERE topic_folder = ? AND day = ? "
+  //             "ORDER BY trip_id DESC LIMIT 1;";
+  //         sqlite3_stmt* stmt = nullptr;
+  //         if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+  //           sqlite3_bind_text(stmt, 1, topic_folder.c_str(), -1, SQLITE_TRANSIENT);
+  //           sqlite3_bind_text(stmt, 2, day.c_str(), -1, SQLITE_TRANSIENT);
+  //           if (sqlite3_step(stmt) == SQLITE_ROW) {
+  //             int trip_id = sqlite3_column_int(stmt, 0);
+  //             const unsigned char* end_ts = sqlite3_column_text(stmt, 1);
+  //             long long end_ts_ns = end_ts ? std::atoll(reinterpret_cast<const char*>(end_ts)) : 0;
+  //             int num_records = sqlite3_column_int(stmt, 2);
+  //             if (end_ts_ns == 0 || num_records == 0) {
+  //               sqlite3_finalize(stmt);
+  //               sqlite3_close(db);
+  //               cached_next_id_[day_path] = trip_id + 1;
+  //               return trip_id;
+  //             }
+  //           }
+  //         }
+  //         if (stmt) sqlite3_finalize(stmt);
+  //         sqlite3_close(db);
+  //       }
+  //     }
+  //   }
+  //   } catch (...) {
+  //     // fall through to default behavior
+  //   }
+  // }
 
   const int next_id = CountTripLogs(day_path);
   cached_next_id_[day_path] = next_id + 1;

@@ -9,7 +9,7 @@ chmod +x run_1min_reboot_auto.sh
 What this does:
 - Starts AVS ingestion (3 subscribers) via `ros2 launch` and waits 60s.
 - Reboots the system automatically.
-- On boot, resumes, records recovery metrics, then exits.
+- On boot, validates durability (CRC + truncation) and rebuilds `global.sqlite3`, then exits.
 
 Manual/advanced:
 ```
@@ -29,16 +29,16 @@ Experiment logic:
 - Creates a new run dir under `/home/avs/Log/power_loss/<run_id>/` and records `state.json`.
 - Starts `ros2 launch avs avs_store.launch.py` and samples a heartbeat plus latest data mtime/path under `/home/avs/DATA/SSD` (excluding `global.sqlite3`).
 - After 60s, issues a reboot and leaves the run marked as active.
-- On next boot, the resume service detects the reboot (boot_id change), restarts ingestion, and waits for new data.
+- On next boot, the resume service detects the reboot (boot_id change) and performs recovery checks only.
 - Metrics are computed as:
   - Power cut interval = boot_time_after_reboot - last_heartbeat_before_reboot.
-  - Recovery time = first_data_after_reboot - boot_time_after_reboot.
-  - Data loss window = first_data_after_reboot - last_data_before_reboot.
+  - Recovery time = time to complete recovery checks after boot.
+  - Data loss window = first_recovered_valid_record - last_durable_record (may be 0 if no new data).
   - Estimated write rate (B/s) from directory size samples before reboot.
   - Estimated lost bytes = write rate * data loss window.
-  - Last durable record before crash = last file mtime/path before reboot.
-  - First recovered valid record after reboot = first file mtime/path after reboot.
-  - CRC validation summary = CRC32 comparison of last durable file before/after reboot (if file size <= `--crc-max-mib`).
+  - Last durable record before crash = last complete chunk end_ts from log (or `.idx` fallback).
+  - First recovered valid record after reboot = first complete chunk seen after reboot (from the same log scan).
+  - CRC validation summary = prefix CRC32 of the trip log up to the last persisted chunk boundary (from log scan).
   - SQLite recovery = rebuilds missing `end_ts_ns`/`number_of_records` from `.idx` after reboot.
 - Writes `power_loss_report.json` and `power_loss_report.txt`, then exits.
 

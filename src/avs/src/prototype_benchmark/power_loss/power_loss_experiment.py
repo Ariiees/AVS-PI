@@ -122,7 +122,28 @@ def crc32_file(path: Path, chunk_size: int = 1024 * 1024) -> Optional[int]:
         return None
 
 
+def crc32_prefix(path: Path, max_bytes: int, chunk_size: int = 1024 * 1024) -> Optional[int]:
+    try:
+        crc = 0
+        remaining = max_bytes
+        with path.open("rb") as f:
+            while remaining > 0:
+                to_read = chunk_size if remaining > chunk_size else remaining
+                chunk = f.read(to_read)
+                if not chunk:
+                    break
+                crc = zlib.crc32(chunk, crc)
+                remaining -= len(chunk)
+        if remaining > 0:
+            return None
+        return crc & 0xFFFFFFFF
+    except Exception:
+        return None
+
+
 TRIP_INDEX_STRUCT = struct.Struct("<qqQII")
+TRIP_HEADER_STRUCT = struct.Struct("<16sQQ")
+CHUNK_HEADER_STRUCT = struct.Struct("<qqII")
 
 
 def find_trip_idx(day_dir: Path, trip_id: int) -> Optional[Path]:
@@ -157,6 +178,310 @@ def read_trip_idx_summary(idx_path: Path) -> Optional[Tuple[int, int]]:
     if last_end_ts is None:
         return None
     return last_end_ts, total_records
+
+
+def scan_log_for_prefix(log_path: Path) -> Optional[Tuple[int, int]]:
+    try:
+        size = log_path.stat().st_size
+        with log_path.open("rb") as f:
+            hdr = f.read(TRIP_HEADER_STRUCT.size)
+            if len(hdr) < TRIP_HEADER_STRUCT.size:
+                return None
+            offset = TRIP_HEADER_STRUCT.size
+            last_end_ts = None
+            prefix_end = None
+            while True:
+                ch = f.read(CHUNK_HEADER_STRUCT.size)
+                if len(ch) < CHUNK_HEADER_STRUCT.size:
+                    break
+                start_ts, end_ts, _rec_count, chunk_size_bytes = CHUNK_HEADER_STRUCT.unpack(ch)
+                if chunk_size_bytes < 0:
+                    break
+                chunk_total = CHUNK_HEADER_STRUCT.size + int(chunk_size_bytes)
+                if offset + chunk_total > size:
+                    break
+                f.seek(int(chunk_size_bytes), os.SEEK_CUR)
+                offset += chunk_total
+                last_end_ts = int(end_ts)
+                prefix_end = offset
+            if last_end_ts is None or prefix_end is None:
+                return None
+            return last_end_ts, prefix_end
+    except Exception:
+        return None
+
+
+def scan_log_first_end_after(log_path: Path, threshold_ns: int) -> Optional[int]:
+    try:
+        size = log_path.stat().st_size
+        with log_path.open("rb") as f:
+            hdr = f.read(TRIP_HEADER_STRUCT.size)
+            if len(hdr) < TRIP_HEADER_STRUCT.size:
+                return None
+            offset = TRIP_HEADER_STRUCT.size
+            while True:
+                ch = f.read(CHUNK_HEADER_STRUCT.size)
+                if len(ch) < CHUNK_HEADER_STRUCT.size:
+                    break
+                _start_ts, end_ts, _rec_count, chunk_size_bytes = CHUNK_HEADER_STRUCT.unpack(ch)
+                if chunk_size_bytes < 0:
+                    break
+                chunk_total = CHUNK_HEADER_STRUCT.size + int(chunk_size_bytes)
+                if offset + chunk_total > size:
+                    break
+                f.seek(int(chunk_size_bytes), os.SEEK_CUR)
+                offset += chunk_total
+                if int(end_ts) >= threshold_ns:
+                    return int(end_ts)
+    except Exception:
+        return None
+    return None
+
+
+def refresh_durable_prefix(args: argparse.Namespace, state: Dict, hint_path: Optional[str]) -> None:
+    log_path = None
+    idx_path = None
+
+    def use_log(path: Path) -> Tuple[Optional[Path], Optional[Path]]:
+        idx = path.with_suffix(".idx")
+        if not idx.exists():
+            idx = None
+        return path, idx
+
+    def use_idx(path: Path) -> Tuple[Optional[Path], Optional[Path]]:
+        log = path.with_suffix(".log")
+        if not log.exists():
+            log = None
+        return log, path
+
+    if hint_path:
+        p = Path(hint_path)
+        if p.exists():
+            if p.suffix == ".log":
+                log_path, idx_path = use_log(p)
+            elif p.suffix == ".idx":
+                log_path, idx_path = use_idx(p)
+
+    if not log_path and state.get("last_durable_log_path"):
+        p = Path(state["last_durable_log_path"])
+        if p.exists():
+            log_path, idx_path = use_log(p)
+
+    if not log_path:
+        log_path, idx_path = find_latest_trip_pair(args.data_root)
+        if log_path and not idx_path:
+            candidate = log_path.with_suffix(".idx")
+            if candidate.exists():
+                idx_path = candidate
+
+    if not idx_path:
+        idx_path = find_latest_trip_idx(args.data_root)
+        if idx_path and not log_path:
+            candidate = idx_path.with_suffix(".log")
+            if candidate.exists():
+                log_path = candidate
+
+    if not log_path:
+        return
+
+    prefix = None
+    if idx_path and idx_path.exists():
+        prefix = prefix_from_idx(log_path, idx_path)
+    if not prefix:
+        prefix = scan_log_for_prefix(log_path)
+    if not prefix:
+        return
+
+    durable_ts_ns, durable_prefix_bytes = prefix
+    state["last_durable_ts_ns"] = durable_ts_ns
+    state["last_durable_iso"] = ns_to_iso(durable_ts_ns)
+    state["last_durable_log_path"] = str(log_path)
+    state["last_durable_idx_path"] = str(idx_path) if idx_path else None
+    state["last_durable_prefix_bytes"] = durable_prefix_bytes
+    if durable_prefix_bytes <= args.crc_max_mib * 1024 * 1024:
+        state["last_durable_crc32"] = crc32_prefix(log_path, durable_prefix_bytes)
+    else:
+        state["last_durable_crc32"] = None
+    try:
+        state["last_durable_log_size"] = log_path.stat().st_size
+    except Exception:
+        state["last_durable_log_size"] = None
+    if idx_path and idx_path.exists():
+        try:
+            state["last_durable_idx_size"] = idx_path.stat().st_size
+        except Exception:
+            state["last_durable_idx_size"] = None
+    else:
+        state["last_durable_idx_size"] = None
+
+
+def read_last_idx_entry(idx_path: Path) -> Optional[Tuple[int, int, int]]:
+    try:
+        size = idx_path.stat().st_size
+        if size < TRIP_INDEX_STRUCT.size:
+            return None
+        with idx_path.open("rb") as f:
+            f.seek(-TRIP_INDEX_STRUCT.size, os.SEEK_END)
+            buf = f.read(TRIP_INDEX_STRUCT.size)
+            if len(buf) < TRIP_INDEX_STRUCT.size:
+                return None
+            start_ts_ns, end_ts_ns, file_offset, chunk_size_bytes, _ = TRIP_INDEX_STRUCT.unpack(buf)
+            return int(end_ts_ns), int(file_offset), int(chunk_size_bytes)
+    except Exception:
+        return None
+
+
+def find_first_idx_entry_after(idx_path: Path, threshold_ns: int) -> Optional[int]:
+    try:
+        with idx_path.open("rb") as f:
+            while True:
+                buf = f.read(TRIP_INDEX_STRUCT.size)
+                if len(buf) < TRIP_INDEX_STRUCT.size:
+                    break
+                _, end_ts_ns, _, _, _ = TRIP_INDEX_STRUCT.unpack(buf)
+                if int(end_ts_ns) >= threshold_ns:
+                    return int(end_ts_ns)
+    except Exception:
+        return None
+    return None
+
+
+def find_latest_trip_pair(root: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    latest_log = None
+    latest_mtime = None
+    for dirpath, _, filenames in os.walk(root):
+        for name in filenames:
+            if not name.endswith(".log"):
+                continue
+            path = Path(dirpath) / name
+            if path.name == "global.sqlite3":
+                continue
+            try:
+                st = path.stat()
+            except (FileNotFoundError, PermissionError):
+                continue
+            if latest_mtime is None or st.st_mtime > latest_mtime:
+                latest_mtime = st.st_mtime
+                latest_log = path
+    if not latest_log:
+        return None, None
+    idx_path = latest_log.with_suffix(".idx")
+    if not idx_path.exists():
+        return latest_log, None
+    return latest_log, idx_path
+
+
+def find_latest_trip_idx(root: Path) -> Optional[Path]:
+    latest_idx = None
+    latest_mtime = None
+    for dirpath, _, filenames in os.walk(root):
+        for name in filenames:
+            if not name.endswith(".idx"):
+                continue
+            path = Path(dirpath) / name
+            try:
+                st = path.stat()
+            except (FileNotFoundError, PermissionError):
+                continue
+            if latest_mtime is None or st.st_mtime > latest_mtime:
+                latest_mtime = st.st_mtime
+                latest_idx = path
+    return latest_idx
+
+
+def ns_to_iso(ns: Optional[int]) -> Optional[str]:
+    if ns is None:
+        return None
+    try:
+        val = float(ns)
+        if val < 1e12:
+            ts = val
+        else:
+            ts = val / 1e9
+        return datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+    except Exception:
+        return None
+
+
+def prefix_from_idx(log_path: Path, idx_path: Optional[Path]) -> Optional[Tuple[int, int]]:
+    if not idx_path or not idx_path.exists():
+        return None
+    last = read_last_idx_entry(idx_path)
+    if not last:
+        return None
+    end_ts_ns, file_offset, chunk_size_bytes = last
+    prefix_end = file_offset + chunk_size_bytes
+    try:
+        size = log_path.stat().st_size
+        prefix_end = min(prefix_end, size)
+    except Exception:
+        pass
+    return end_ts_ns, int(prefix_end)
+
+
+def truncate_log_and_idx(log_path: Path, idx_path: Optional[Path], prefix_end: int) -> Dict:
+    result = {"log_truncated": False, "idx_truncated": False, "trimmed_bytes": 0}
+    try:
+        size = log_path.stat().st_size
+    except Exception:
+        return result
+
+    try:
+        prefix_cap = min(prefix_end, size) if prefix_end and prefix_end > 0 else size
+        entries = []
+        stable_end = TRIP_HEADER_STRUCT.size
+        with log_path.open("rb") as f_log:
+            hdr = f_log.read(TRIP_HEADER_STRUCT.size)
+            if len(hdr) < TRIP_HEADER_STRUCT.size:
+                return result
+            offset = TRIP_HEADER_STRUCT.size
+            while True:
+                ch = f_log.read(CHUNK_HEADER_STRUCT.size)
+                if len(ch) < CHUNK_HEADER_STRUCT.size:
+                    break
+                start_ts, end_ts, rec_count, chunk_size_bytes = CHUNK_HEADER_STRUCT.unpack(ch)
+                if chunk_size_bytes < 0:
+                    break
+                chunk_total = CHUNK_HEADER_STRUCT.size + int(chunk_size_bytes)
+                if offset + chunk_total > size or offset + chunk_total > prefix_cap:
+                    break
+                entries.append((int(start_ts), int(end_ts), int(offset), int(chunk_total), int(rec_count)))
+                f_log.seek(int(chunk_size_bytes), os.SEEK_CUR)
+                offset += chunk_total
+            stable_end = offset
+    except Exception:
+        return result
+
+    if size > stable_end:
+        try:
+            with log_path.open("r+b") as f:
+                f.truncate(stable_end)
+            result["log_truncated"] = True
+            result["trimmed_bytes"] = size - stable_end
+            size = stable_end
+        except Exception:
+            return result
+
+    if not idx_path:
+        return result
+
+    rebuilt = b"".join(TRIP_INDEX_STRUCT.pack(*e) for e in entries)
+    try:
+        existing = idx_path.read_bytes() if idx_path.exists() else b""
+    except Exception:
+        existing = b""
+
+    if existing != rebuilt:
+        try:
+            tmp_path = idx_path.with_suffix(".idx.tmp")
+            with tmp_path.open("wb") as out:
+                out.write(rebuilt)
+            tmp_path.replace(idx_path)
+            result["idx_truncated"] = True
+        except Exception:
+            return result
+
+    return result
 
 
 def recover_global_sqlite(data_root: Path) -> Dict:
@@ -386,14 +711,36 @@ def init_state(args: argparse.Namespace, run_dir: Path) -> Dict:
     boot_time = read_boot_time_epoch()
     now = time.time()
     data_mtime, data_path, data_size = latest_data_stats(args.data_root)
-    crc_pre = None
-    if data_path:
-        p = Path(data_path)
+    log_path, _idx_path = find_latest_trip_pair(args.data_root)
+    idx_path = log_path.with_suffix(".idx") if log_path else None
+    durable_ts_ns = None
+    durable_crc = None
+    durable_prefix_bytes = None
+    if log_path:
+        scan = scan_log_for_prefix(log_path)
+        if scan:
+            durable_ts_ns, durable_prefix_bytes = scan
+            if durable_prefix_bytes <= args.crc_max_mib * 1024 * 1024:
+                durable_crc = crc32_prefix(log_path, durable_prefix_bytes)
+        else:
+            idx_path = log_path.with_suffix(".idx")
+            idx_prefix = prefix_from_idx(log_path, idx_path if idx_path.exists() else None)
+            if idx_prefix:
+                durable_ts_ns, durable_prefix_bytes = idx_prefix
+                if durable_prefix_bytes <= args.crc_max_mib * 1024 * 1024:
+                    durable_crc = crc32_prefix(log_path, durable_prefix_bytes)
+    log_size = None
+    idx_size = None
+    if log_path:
         try:
-            if p.is_file() and p.stat().st_size <= args.crc_max_mib * 1024 * 1024:
-                crc_pre = crc32_file(p)
+            log_size = log_path.stat().st_size
         except Exception:
-            crc_pre = None
+            log_size = None
+    if idx_path and idx_path.exists():
+        try:
+            idx_size = idx_path.stat().st_size
+        except Exception:
+            idx_size = None
     size_now = dir_size_bytes(args.data_root)
     size_samples = [{"t": now, "size": size_now}]
 
@@ -412,7 +759,14 @@ def init_state(args: argparse.Namespace, run_dir: Path) -> Dict:
         "last_data_iso": now_iso(data_mtime) if data_mtime else None,
         "last_data_path": data_path,
         "last_data_size": data_size,
-        "last_data_crc32": crc_pre,
+        "last_durable_ts_ns": durable_ts_ns,
+        "last_durable_iso": ns_to_iso(durable_ts_ns),
+        "last_durable_log_path": str(log_path) if log_path else None,
+        "last_durable_idx_path": None,
+        "last_durable_prefix_bytes": durable_prefix_bytes,
+        "last_durable_crc32": durable_crc,
+        "last_durable_log_size": log_size,
+        "last_durable_idx_size": idx_size,
         "size_samples": size_samples,
         "ingest_cmd": build_launch_command(args),
         "auto_reboot_after_sec": args.auto_reboot_after,
@@ -448,6 +802,7 @@ def monitor_run(
                 state["last_heartbeat_iso"] = now_iso(now)
                 state["reboot_requested_epoch"] = now
                 state["reboot_requested_iso"] = now_iso(now)
+                refresh_durable_prefix(args, state, state.get("last_data_path"))
                 update_state(state_path, state)
                 ok, err = issue_reboot(args.reboot_command, args.reboot_command_timeout, args.allow_reboot_sudo)
                 if not ok:
@@ -472,9 +827,39 @@ def monitor_run(
             state["last_data_iso"] = now_iso(data_mtime)
             state["last_data_path"] = data_path
             state["last_data_size"] = data_size
+            refresh_durable_prefix(args, state, data_path)
 
         state["last_heartbeat_epoch"] = now
         state["last_heartbeat_iso"] = now_iso(now)
+
+        durable_hint = state.get("last_data_path")
+        if durable_hint and not str(durable_hint).endswith(".log"):
+            durable_hint = state.get("last_durable_log_path")
+        if durable_hint and str(durable_hint).endswith(".log"):
+            log_path = Path(durable_hint)
+            idx_path = log_path.with_suffix(".idx")
+            log_size = None
+            idx_size = None
+            if log_path.exists():
+                try:
+                    log_size = log_path.stat().st_size
+                except Exception:
+                    log_size = None
+            if idx_path.exists():
+                try:
+                    idx_size = idx_path.stat().st_size
+                except Exception:
+                    idx_size = None
+            if (log_size is not None and log_size != state.get("last_durable_log_size")) or (
+                idx_size is not None and idx_size != state.get("last_durable_idx_size")
+            ):
+                refresh_durable_prefix(args, state, str(log_path))
+                if log_size is not None:
+                    state["last_durable_log_size"] = log_size
+                if idx_path.exists():
+                    state["last_durable_idx_size"] = idx_size
+                else:
+                    state["last_durable_idx_size"] = None
 
         if next_size_epoch and now >= next_size_epoch:
             size_now = dir_size_bytes(args.data_root)
@@ -511,21 +896,23 @@ def wait_for_new_data(
 
 def write_report(run_dir: Path, report: Dict) -> None:
     write_json_atomic(run_dir / REPORT_JSON, report)
+    def fmt(val: Optional[object]) -> str:
+        return "N/A" if val is None else str(val)
     lines = [
         "Power Loss Experiment Report",
-        f"Run ID: {report.get('run_id')}",
-        f"Start Time: {report.get('start_iso')}",
-        f"Boot Time (post-reboot): {report.get('reboot_boot_time_iso')}",
-        f"Power Cut Interval (s): {report.get('power_cut_interval_sec')}",
-        f"Recovery Time (s): {report.get('recovery_time_sec')}",
-        f"Data Loss Window (s): {report.get('data_loss_window_sec')}",
-        f"Estimated Write Rate (B/s): {report.get('estimated_write_rate_bytes_per_sec')}",
-        f"Estimated Lost Bytes: {report.get('estimated_lost_bytes')}",
-        f"Last durable record before crash: {report.get('last_data_before_iso')} {report.get('last_data_before_path')}",
-        f"First recovered valid record after reboot: {report.get('first_data_after_iso')} {report.get('first_data_after_path')}",
-        f"CRC validation summary: {report.get('crc_validation_summary')}",
-        f"SQLite recovery: {report.get('sqlite_recovery')}",
-        f"Notes: {report.get('notes')}",
+        f"Run ID: {fmt(report.get('run_id'))}",
+        f"Start Time: {fmt(report.get('start_iso'))}",
+        f"Boot Time (post-reboot): {fmt(report.get('reboot_boot_time_iso'))}",
+        f"Power Cut Interval (s): {fmt(report.get('power_cut_interval_sec'))}",
+        f"Recovery Time (s): {fmt(report.get('recovery_time_sec'))}",
+        f"Data Loss Window (s): {fmt(report.get('data_loss_window_sec'))}",
+        f"Estimated Write Rate (B/s): {fmt(report.get('estimated_write_rate_bytes_per_sec'))}",
+        f"Estimated Lost Bytes: {fmt(report.get('estimated_lost_bytes'))}",
+        f"Last durable record before crash: {fmt(report.get('last_data_before_iso'))} {fmt(report.get('last_data_before_path'))}",
+        f"First recovered valid record after reboot: {fmt(report.get('first_data_after_iso'))} {fmt(report.get('first_data_after_path'))}",
+        f"CRC validation summary: {fmt(report.get('crc_validation_summary'))}",
+        f"SQLite recovery: {fmt(report.get('sqlite_recovery'))}",
+        f"Notes: {fmt(report.get('notes'))}",
     ]
     (run_dir / REPORT_TXT).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -538,37 +925,105 @@ def resume_after_reboot(args: argparse.Namespace, run_dir: Path, state: Dict) ->
     if boot_time and state.get("last_heartbeat_epoch"):
         power_cut_interval = boot_time - state["last_heartbeat_epoch"]
 
+    last_before_ts_ns = state.get("last_durable_ts_ns")
+    last_before_path = state.get("last_durable_log_path")
+    pre_prefix_bytes = state.get("last_durable_prefix_bytes")
+    pre_crc = state.get("last_durable_crc32")
 
-    sqlite_recovery = recover_global_sqlite(args.data_root)
+    log_path = Path(last_before_path) if last_before_path else None
+    if not log_path or not log_path.exists():
+        log_path, _idx = find_latest_trip_pair(args.data_root)
+    idx_path = log_path.with_suffix(".idx") if log_path else None
+    if not idx_path or not idx_path.exists():
+        idx_path = find_latest_trip_idx(args.data_root)
+        if idx_path and not log_path:
+            candidate = idx_path.with_suffix(".log")
+            log_path = candidate if candidate.exists() else None
 
-    avs_proc = start_ingest_launch(args, run_dir)
-    last_before = state.get("last_data_mtime")
-    last_before_path = state.get("last_data_path")
-    crc_summary = None
-    if last_before_path:
-        p = Path(last_before_path)
-        post_crc = None
-        if p.exists():
-            post_crc = crc32_file(p)
-        crc_summary = {
-            "path": last_before_path,
-            "pre_crc32": state.get("last_data_crc32"),
-            "post_crc32": post_crc,
-            "match": state.get("last_data_crc32") is not None and post_crc == state.get("last_data_crc32"),
-            "note": None if post_crc is not None else "missing or unreadable after reboot",
-        }
+    if log_path and (last_before_ts_ns is None or pre_prefix_bytes is None):
+        scan = scan_log_for_prefix(log_path)
+        if scan:
+            last_before_ts_ns, pre_prefix_bytes = scan
+        else:
+            idx_prefix = prefix_from_idx(log_path, idx_path if idx_path and idx_path.exists() else None)
+            if idx_prefix:
+                last_before_ts_ns, pre_prefix_bytes = idx_prefix
+    if pre_prefix_bytes is None and log_path and idx_path and idx_path.exists():
+        idx_prefix = prefix_from_idx(log_path, idx_path)
+        if idx_prefix:
+            last_before_ts_ns, pre_prefix_bytes = idx_prefix
+    if last_before_ts_ns is None and idx_path and idx_path.exists():
+        summary = read_trip_idx_summary(idx_path)
+        if summary:
+            last_before_ts_ns, _total_records = summary
+    if last_before_ts_ns is None and state.get("last_data_mtime"):
+        last_before_ts_ns = int(float(state["last_data_mtime"]) * 1e9)
+        if not last_before_path:
+            last_before_path = state.get("last_data_path")
+            if last_before_path and str(last_before_path).endswith(".log"):
+                log_path = Path(last_before_path)
 
-    first_after_mtime, first_after_path, first_after_size = wait_for_new_data(
-        args.data_root, last_before, args.scan_interval, args.recovery_timeout, min_epoch=boot_time
-    )
+    if log_path and pre_prefix_bytes is not None and pre_crc is None:
+        crc_len = min(int(pre_prefix_bytes), args.crc_max_mib * 1024 * 1024)
+        pre_crc = crc32_prefix(log_path, crc_len)
+
+    after_ts_ns = None
+    after_prefix_bytes = None
+    if log_path:
+        scan_after = scan_log_for_prefix(log_path)
+        if scan_after:
+            after_ts_ns, after_prefix_bytes = scan_after
+        else:
+            idx_prefix = prefix_from_idx(log_path, idx_path if idx_path and idx_path.exists() else None)
+            if idx_prefix:
+                after_ts_ns, after_prefix_bytes = idx_prefix
+    if after_prefix_bytes is None and log_path and idx_path and idx_path.exists():
+        idx_prefix = prefix_from_idx(log_path, idx_path)
+        if idx_prefix:
+            after_ts_ns, after_prefix_bytes = idx_prefix
+    if after_ts_ns is None and idx_path and idx_path.exists():
+        summary = read_trip_idx_summary(idx_path)
+        if summary:
+            after_ts_ns, _total_records = summary
+
+    truncation = {"log_truncated": False, "idx_truncated": False, "trimmed_bytes": 0}
+    if log_path and after_prefix_bytes is not None:
+        truncation = truncate_log_and_idx(log_path, idx_path if idx_path and idx_path.exists() else None, int(after_prefix_bytes))
+
+    post_crc = None
+    crc_len = None
+    if log_path and after_prefix_bytes is not None:
+        if pre_prefix_bytes is not None:
+            crc_len = min(int(pre_prefix_bytes), int(after_prefix_bytes))
+        else:
+            crc_len = int(after_prefix_bytes)
+        crc_len = min(crc_len, args.crc_max_mib * 1024 * 1024)
+        post_crc = crc32_prefix(log_path, crc_len)
+
+    crc_summary = {
+        "path": str(log_path) if log_path else "N/A",
+        "pre_crc32": pre_crc if pre_crc is not None else 0,
+        "post_crc32": post_crc if post_crc is not None else 0,
+        "match": pre_crc is not None and post_crc is not None and pre_crc == post_crc,
+        "prefix_bytes_compared": crc_len if crc_len is not None else 0,
+        "note": None,
+        "truncation": truncation,
+    }
 
     recovery_time = None
-    if boot_time and first_after_mtime and first_after_mtime >= boot_time:
-        recovery_time = first_after_mtime - boot_time
+    if boot_time:
+        recovery_time = max(0.0, now - boot_time)
 
     data_loss_window = None
-    if last_before and first_after_mtime and first_after_mtime >= last_before:
-        data_loss_window = first_after_mtime - last_before
+    if last_before_ts_ns:
+        data_loss_window = max(0.0, boot_time - (last_before_ts_ns / 1e9))
+
+    boot_time_ns = int(boot_time * 1e9) if boot_time else None
+    first_after_ts_ns = None
+    if log_path and boot_time_ns:
+        first_after_ts_ns = scan_log_first_end_after(log_path, boot_time_ns)
+    if first_after_ts_ns is None:
+        first_after_ts_ns = after_ts_ns
 
     size_samples = state.get("size_samples", [])
     write_rate = estimate_write_rate(size_samples)
@@ -589,29 +1044,43 @@ def resume_after_reboot(args: argparse.Namespace, run_dir: Path, state: Dict) ->
         "data_loss_window_sec": data_loss_window,
         "estimated_write_rate_bytes_per_sec": write_rate,
         "estimated_lost_bytes": lost_bytes,
-        "last_data_before_epoch": last_before,
-        "last_data_before_iso": now_iso(last_before) if last_before else None,
-        "last_data_before_path": last_before_path,
-        "first_data_after_epoch": first_after_mtime,
-        "first_data_after_iso": now_iso(first_after_mtime) if first_after_mtime else None,
-        "first_data_after_path": first_after_path,
+        "last_data_before_epoch": last_before_ts_ns / 1e9 if last_before_ts_ns else None,
+        "last_data_before_iso": ns_to_iso(last_before_ts_ns),
+        "last_data_before_path": last_before_path if last_before_path else (str(log_path) if log_path else None),
+        "first_data_after_epoch": first_after_ts_ns / 1e9 if first_after_ts_ns else None,
+        "first_data_after_iso": ns_to_iso(first_after_ts_ns),
+        "first_data_after_path": str(log_path) if log_path else (last_before_path if last_before_path else None),
         "crc_validation_summary": crc_summary,
-        "sqlite_recovery": sqlite_recovery,
-        "notes": None if first_after_mtime else "Recovery timeout: no new data detected",
+        "sqlite_recovery": None,
+        "notes": None,
     }
-    if first_after_mtime and boot_time and first_after_mtime < boot_time:
+    if last_before_ts_ns is None:
         report["notes"] = (
             (report["notes"] + "; " if report["notes"] else "")
-            + "First data timestamp precedes reboot; check system clock or file mtimes"
+            + "No durable prefix discovered; using index fallback if available"
+        )
+    if log_path is None:
+        report["notes"] = (
+            (report["notes"] + "; " if report["notes"] else "")
+            + "No trip log found for CRC/durability checks"
+        )
+    if pre_prefix_bytes is not None and pre_prefix_bytes > args.crc_max_mib * 1024 * 1024:
+        report["notes"] = (
+            (report["notes"] + "; " if report["notes"] else "")
+            + "CRC truncated: durable prefix larger than crc-max-mib"
+        )
+    if truncation.get("log_truncated"):
+        report["notes"] = (
+            (report["notes"] + "; " if report["notes"] else "")
+            + f"Truncated incomplete chunk ({truncation.get('trimmed_bytes', 0)} bytes)"
         )
 
     state["status"] = "completed"
     state["recovery_report"] = report
     update_state(run_dir / STATE_FILE, state)
+    sqlite_recovery = recover_global_sqlite(args.data_root)
+    report["sqlite_recovery"] = sqlite_recovery
     write_report(run_dir, report)
-
-    if avs_proc and not args.leave_avs_running:
-        terminate_process(avs_proc)
 
     clear_active_run()
 
@@ -622,12 +1091,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--scan-interval", type=float, default=2.0)
     ap.add_argument("--max-runtime", type=float, default=0.0, help="0 means no limit")
     ap.add_argument("--recovery-timeout", type=float, default=600.0)
-    ap.add_argument("--crc-max-mib", type=int, default=64)
+    ap.add_argument("--crc-max-mib", type=int, default=512)
     ap.add_argument("--size-sample-interval", type=float, default=10.0)
     ap.add_argument("--size-sample-max", type=int, default=30)
     ap.add_argument("--start-new", action="store_true")
     ap.add_argument("--resume", action="store_true")
-    ap.add_argument("--leave-avs-running", action="store_true")
     ap.add_argument("--auto-reboot-after", type=float, default=0.0)
     ap.add_argument("--reboot-command", default="systemctl reboot")
     ap.add_argument("--reboot-command-timeout", type=float, default=10.0)
