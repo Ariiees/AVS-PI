@@ -69,8 +69,10 @@ public:
 
 
     subscription_ = this->create_subscription<gps_msgs::msg::GPSFix>(
-      gps_topic_, make_auto_qos(gps_topic_),
+      gps_topic_, rclcpp::SensorDataQoS(),
       std::bind(&GpsProcessNode::gpsCallback, this, std::placeholders::_1));
+
+    // latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/gps_latency_us", 10);
 
     RCLCPP_INFO(this->get_logger(),
                 "AVS GPS node started. Subscribed to %s; writing to append-logger (path=%s trip=%s)",
@@ -103,6 +105,8 @@ private:
     
     records_count_ = 0;
 
+    // const auto t0 = std::chrono::steady_clock::now();
+
     uint64_t ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                        std::chrono::system_clock::now().time_since_epoch()
                      ).count();
@@ -122,40 +126,14 @@ private:
 
     try {
       append_logger_->appendRecord(ts_ns, payload);
+      // const auto t1 = std::chrono::steady_clock::now();
+      // const auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+      // std_msgs::msg::Int64 m;
+      // m.data = latency_us;
+      // latency_pub_->publish(m);
     } catch (const std::exception &e) {
       RCLCPP_ERROR(this->get_logger(), "appendRecord failed: %s", e.what());
     }
-  }
-
-  rclcpp::QoS make_auto_qos(const std::string &topic)
-  {
-    using rclcpp::ReliabilityPolicy;
-
-    rclcpp::QoS qos = rclcpp::SensorDataQoS();  // BestEffort, small depth
-    // qos.durability(rclcpp::DurabilityPolicy::Volatile);
-
-    // for (int i = 0; i < 50; ++i) {
-    //   auto infos = this->get_publishers_info_by_topic(topic);
-    //   if (!infos.empty()) {
-    //     auto offered = infos.front().qos_profile();
-    //     qos.reliability(offered.reliability());
-
-    //     RCLCPP_INFO(
-    //       this->get_logger(),
-    //       "QoS for %s -> depth=10 reliability=%d durability=%d",
-    //       topic.c_str(),
-    //       static_cast<int>(qos.get_rmw_qos_profile().reliability),
-    //       static_cast<int>(qos.get_rmw_qos_profile().durability));
-    //     return qos;
-    //   }
-    //   rclcpp::sleep_for(std::chrono::milliseconds(100));
-    // }
-
-    // RCLCPP_WARN(
-    //   this->get_logger(),
-    //   "No publisher QoS detected on %s; using fallback QoS(KEEP_LAST depth=10, RELIABLE, VOLATILE)",
-    //   topic.c_str());
-    return qos;
   }
 
 private:
@@ -180,7 +158,7 @@ private:
   std::shared_ptr<avs::TripManager> trip_mgr_;
 
   rclcpp::Subscription<gps_msgs::msg::GPSFix>::SharedPtr subscription_;
-  rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr latency_pub_;
+  // rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr latency_pub_;
 };
 
 };

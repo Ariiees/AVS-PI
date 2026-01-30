@@ -66,10 +66,10 @@ public:
     append_logger_->startTrip(current_day, folder_name, trip_id, trip_start_ns);
 
     subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
-      image_topic_, make_auto_qos(image_topic_),
+      image_topic_, rclcpp::SensorDataQoS(),
       std::bind(&ImgProcessNode::imageCallback, this, _1));
     
-    latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/record_latency_us", 10);
+    // latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/image_latency_us", 10);
 
     RCLCPP_INFO(this->get_logger(),
                 "AVS Image node started. Subscribed to %s; writing to append-logger (path=%s trip=%s)",
