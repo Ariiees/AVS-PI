@@ -9,7 +9,7 @@ common:
 image_dedup:    # Deduplicate image and save each image to ssd
   hamming_threshold: 2
   img_format: jpg     # "jpg" or "png"
-  img_quality: 80       # 0–100 for jpg, 0–9 for png
+  img_quality: 95       # 0–100 for jpg, 0–9 for png
 
 image_compress:  # Compress image sequence and save to hdd
   fps: 10               # KITTI image publish rate is 10Hz, adjust it according to your camera frequency
@@ -22,5 +22,5 @@ lidar_compress:
   lidar_format: laz
 
 gps_downscale:
-  open: true
-  frequency: 50 # hz downscale to 1/frequency
+  open: false
+  frequency: 5 # hz downscale to 1/frequency

@@ -1,7 +1,7 @@
 # Benchmark avs v.s rosbag overall
 ```
 ./rosbag_report.py --duration 648
-./rosbag_report.py --duration 648 --compression
+./rosbag_report.py --duration 648 --compression --storage-id mcap
 ./avs_report.py --duration 648
 ```
 
