@@ -238,6 +238,27 @@ target_link_libraries(debug
 ament_target_dependencies(debug
   rclcpp sensor_msgs yaml-cpp 
 )
+
+# ========== Reduction Throughput Report ==========
+add_executable(reduct_report
+  src/prototype_benchmark/reduct_report.cpp
+  src/process/img_dedup.cpp
+  src/process/lidar_compress.cpp
+  src/process/lidar_downsample.cpp
+)
+
+target_link_libraries(reduct_report
+  ${OpenCV_LIBS}
+  ${PCL_LIBRARIES}
+  ${PCL_IO_LIBRARIES}
+  ${LASZIP_LIBRARY}
+  yaml-cpp
+)
+
+ament_target_dependencies(reduct_report
+  rclcpp sensor_msgs cv_bridge pcl_conversions yaml-cpp
+)
+
 # ========== Install Targets ==========
 install(TARGETS
   image_subscriber
@@ -247,6 +268,7 @@ install(TARGETS
   archive
   offload
   debug
+  reduct_report
   DESTINATION lib/${PROJECT_NAME}
 )
 

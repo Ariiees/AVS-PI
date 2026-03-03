@@ -5,6 +5,13 @@
 ./avs_report.py --duration 648
 ```
 
+# Reduction throughput report (live topics, no ros2bag/file output)
+```
+./reduct_report.py --duration 30 --sensors camera,lidar \
+  --camera-topic /my_camera/pylon_ros2_camera_node/image_raw \
+  --lidar-topic /sensing/lidar/top/pointcloud
+```
+
 # Check SSD SMART Log
 ```
 lsblk
