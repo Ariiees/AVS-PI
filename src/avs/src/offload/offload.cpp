@@ -274,10 +274,12 @@ int main(int argc, char** argv) {
   std::vector<double> v_latency_ms;
   std::vector<double> v_goodput_ratio;
   std::vector<double> v_cpu_pct;
+  std::vector<double> v_throughput_mb_s;
 
   v_latency_ms.reserve((std::size_t)runs);
   v_goodput_ratio.reserve((std::size_t)runs);
   v_cpu_pct.reserve((std::size_t)runs);
+  v_throughput_mb_s.reserve((std::size_t)runs);
 
   for (int run_i = 0; run_i < runs; ++run_i) {
     std::uint64_t request_id = mono_ns() ^ (std::uint64_t(::getpid()) << 32) ^ (std::uint64_t)run_i;
@@ -541,11 +543,13 @@ int main(int argc, char** argv) {
 
     double latency_ms = ns_to_ms(ack_recv_ns - sender_first_ns);
     double goodput_ratio = (bytes_sent_total > 0) ? (100.0 * (double)payload_bytes_sent_ok / (double)bytes_sent_total) : 0.0;
+    double throughput_mb_s = (send_wall_s > 0.0) ? ((double)bytes_sent_total / 1e6 / send_wall_s) : 0.0;
 
     if (ack.status == 0) {
       v_latency_ms.push_back(latency_ms);
       v_goodput_ratio.push_back(goodput_ratio);
       v_cpu_pct.push_back(cpu_pct);
+      v_throughput_mb_s.push_back(throughput_mb_s);
     } else {
       std::cerr << "warn run failed run=" << run_i << " ack_status=" << ack.status << "\n";
     }
@@ -558,6 +562,7 @@ int main(int argc, char** argv) {
       << " cpu_pct=" << cpu_pct
       << " records_sent_ok=" << records_sent_ok
       << " total_bytes_sent=" << bytes_sent_total
+      << " throughput_mb_s=" << throughput_mb_s
       << " recv_records_ok=" << ack.recv_records_ok
       << " crc_fail=" << ack.recv_records_crc_fail
       << "\n";
@@ -573,6 +578,8 @@ int main(int argc, char** argv) {
     << " latency_ms_ci95=" << ci_halfwidth95(v_latency_ms)
     << " cpu_pct_avg=" << mean(v_cpu_pct)
     << " cpu_pct_ci95=" << ci_halfwidth95(v_cpu_pct)
+    << " wire_throughput_mb_s_avg=" << mean(v_throughput_mb_s)
+    << " wire_throughput_mb_s_ci95=" << ci_halfwidth95(v_throughput_mb_s)
     << "\n";
 
   return 0;
