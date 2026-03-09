@@ -51,8 +51,8 @@ def start_proc(cmd):
     """Start a process in its own group for clean shutdown."""
     return subprocess.Popen(
         cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        # stdout=subprocess.DEVNULL,
+        # stderr=subprocess.DEVNULL,
         preexec_fn=os.setsid
     )
 
@@ -204,6 +204,7 @@ def main():
                 ["ros2", "run", "avs", "lidar_subscriber"],
                 ["ros2", "run", "avs", "gps_subscriber"],
             ]
+
             for c in cmds:
                 popens.append(start_proc(c))
 

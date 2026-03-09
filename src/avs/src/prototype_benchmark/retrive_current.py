@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
+import argparse
 import mmap
-import os
+import operator
+import resource
 import sqlite3
 import struct
 import sys
 import time
 import yaml
-import resource
-import operator
 from dataclasses import dataclass
 from pathlib import Path
 
 
 SSD_ROOT = Path("/home/avs/DATA/SSD")
 
+
 def avs_pi_path():
     return Path("/home/avs") / ("AVS" + chr(45) + "PI")
+
 
 TOPIC_MAP_PATH = avs_pi_path() / "src/avs/config/topics.yaml"
 
@@ -44,17 +46,10 @@ class TripIndexEntry:
     record_count: int
 
 
-@dataclass(frozen=True)
-class RecordMeta:
-    ts_ns: int
-    payload_size: int
-    locator: str
-
-
-def load_topic_map(path):
+def load_topic_map(path: Path):
     if not path.exists():
         raise FileNotFoundError(f"topics yaml not found: {path}")
-    with open(path, "r") as f:
+    with path.open("r") as f:
         raw = yaml.safe_load(f)
     out = {}
     for topic, meta in raw.items():
@@ -74,35 +69,30 @@ def open_global_db():
     return conn
 
 
-def load_closed_trips_overlapping(conn, sensor_topic, t_start_ns, t_end_ns):
+def table_columns(conn: sqlite3.Connection, table_name: str):
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT topic_folder, day, trip_id, start_ts_ns, end_ts_ns
-        FROM global
-        WHERE sensor_topic = ?
-          AND end_ts_ns != '0'
-          AND CAST(start_ts_ns AS INTEGER) <= ?
-          AND CAST(end_ts_ns AS INTEGER) >= ?
-        ORDER BY day ASC, trip_id ASC
-        """,
-        (sensor_topic, t_end_ns, t_start_ns),
-    )
-    rows = []
-    for r in cur.fetchall():
-        rows.append(
-            GlobalTripRow(
-                topic_folder=str(r["topic_folder"]),
-                day=str(r["day"]),
-                trip_id=int(r["trip_id"]),
-                start_ts_ns=int(r["start_ts_ns"]),
-                end_ts_ns=int(r["end_ts_ns"]),
-            )
-        )
-    return rows
+    cur.execute(f"PRAGMA table_info({table_name})")
+    cols = [str(r[1]) for r in cur.fetchall()]
+    return set(cols)
 
 
-def trip_paths(topic_folder, day, trip_id):
+def pick_open_record_count_column(conn: sqlite3.Connection):
+    cols = table_columns(conn, "global")
+    candidates = [
+        "record_num",
+        "record_count",
+        "records",
+        "num_records",
+        "n_records",
+        "total_records",
+    ]
+    for c in candidates:
+        if c in cols:
+            return c
+    return None
+
+
+def trip_paths(topic_folder: str, day: str, trip_id: int):
     day_dir = SSD_ROOT / topic_folder / day
     log_p = day_dir / f"trip_{trip_id:02d}.log"
     idx_p = day_dir / f"trip_{trip_id:02d}.idx"
@@ -122,11 +112,11 @@ def iter_index_entries_stream(idx_f):
         yield TripIndexEntry(int(s), int(e), int(fo), int(cb), int(rc))
 
 
-def iter_record_sizes_for_trip_mmap(log_path, idx_path, t_start_ns, t_end_ns, locator_prefix):
+def iter_record_sizes_open_trip_mmap(log_path: Path, idx_path: Path):
     """
-    Streaming iterator backed by mmap, without creating memoryview objects.
-    Yields RecordMeta plus payload size.
-    This prevents BufferError on mmap close.
+    For current open trip, scan all indexed chunks and yield per record payload size.
+    No timestamp filtering.
+    Uses mmap snapshot of current log file size.
     """
     chunk_header_fmt = "<qqII"
     chunk_header_sz = struct.calcsize(chunk_header_fmt)
@@ -142,18 +132,8 @@ def iter_record_sizes_for_trip_mmap(log_path, idx_path, t_start_ns, t_end_ns, lo
         try:
             mm_len = mm.size()
             chunk_i = 0
-            started = False
 
             for ent in iter_index_entries_stream(idx_f):
-                if not started:
-                    if ent.end_ts_ns < t_start_ns:
-                        chunk_i += 1
-                        continue
-                    started = True
-
-                if ent.start_ts_ns > t_end_ns:
-                    return
-
                 off = int(ent.file_offset)
                 sz = int(ent.chunk_size_bytes)
 
@@ -181,7 +161,7 @@ def iter_record_sizes_for_trip_mmap(log_path, idx_path, t_start_ns, t_end_ns, lo
 
                 while rec_i < record_count and (p + record_header_sz) <= end:
                     try:
-                        ts_ns, payload_sz = struct.unpack_from(record_header_fmt, mm, p)
+                        _ts_ns, payload_sz = struct.unpack_from(record_header_fmt, mm, p)
                     except struct.error:
                         break
 
@@ -194,10 +174,7 @@ def iter_record_sizes_for_trip_mmap(log_path, idx_path, t_start_ns, t_end_ns, lo
 
                     p = p + payload_sz
 
-                    if t_start_ns <= ts_ns <= t_end_ns:
-                        loc = f"{locator_prefix}:off{ent.file_offset}:chunk{chunk_i}:rec{rec_i}"
-                        meta = RecordMeta(int(ts_ns), int(payload_sz), loc)
-                        yield meta, int(payload_sz)
+                    yield int(payload_sz)
 
                     rec_i += 1
 
@@ -229,26 +206,41 @@ def percentile(vals, p):
     return int(est)
 
 
-def mode_list(sensor, info, t_start_ns, t_end_ns):
-    conn = open_global_db()
-    try:
-        trips = load_closed_trips_overlapping(conn, sensor, t_start_ns, t_end_ns)
-    finally:
-        conn.close()
+def load_open_trips(conn: sqlite3.Connection, sensor_topic: str):
+    rc_col = pick_open_record_count_column(conn)
+    if rc_col is not None:
+        where_open = f"CAST({rc_col} AS INTEGER) = 0"
+    else:
+        where_open = "CAST(end_ts_ns AS INTEGER) = 0"
 
-    for tr in trips:
-        log_p, idx_p = trip_paths(tr.topic_folder, tr.day, tr.trip_id)
-        if not log_p.exists() or not idx_p.exists():
-            continue
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT topic_folder, day, trip_id, start_ts_ns, end_ts_ns
+        FROM global
+        WHERE sensor_topic = ?
+          AND ({where_open})
+        ORDER BY day ASC, trip_id ASC
+        """,
+        (sensor_topic,),
+    )
 
-        prefix = f"SSD:{sensor}:{tr.day}:trip{tr.trip_id:02d}"
-        for meta, _psz in iter_record_sizes_for_trip_mmap(log_p, idx_p, t_start_ns, t_end_ns, prefix):
-            sys.stdout.write(f"{sensor}|{info.sensor_type}|{meta.ts_ns}|{meta.locator}\n")
+    rows = []
+    for r in cur.fetchall():
+        rows.append(
+            GlobalTripRow(
+                topic_folder=str(r["topic_folder"]),
+                day=str(r["day"]),
+                trip_id=int(r["trip_id"]),
+                start_ts_ns=int(r["start_ts_ns"]),
+                end_ts_ns=int(r["end_ts_ns"]),
+            )
+        )
+    return rows
 
 
-def mode_bench(sensor, info, t_start_ns, t_end_ns, max_frames):
+def bench_open_current(sensor: str, info: TopicInfo, max_frames: int):
     t0 = time.perf_counter_ns()
-
     first = True
     ttfb_ns = 0
 
@@ -258,7 +250,7 @@ def mode_bench(sensor, info, t_start_ns, t_end_ns, max_frames):
 
     conn = open_global_db()
     try:
-        trips = load_closed_trips_overlapping(conn, sensor, t_start_ns, t_end_ns)
+        trips = load_open_trips(conn, sensor)
     finally:
         conn.close()
 
@@ -267,8 +259,7 @@ def mode_bench(sensor, info, t_start_ns, t_end_ns, max_frames):
         if not log_p.exists() or not idx_p.exists():
             continue
 
-        prefix = f"SSD:{sensor}:{tr.day}:trip{tr.trip_id:02d}"
-        it = iter_record_sizes_for_trip_mmap(log_p, idx_p, t_start_ns, t_end_ns, prefix)
+        it = iter_record_sizes_open_trip_mmap(log_p, idx_p)
 
         while True:
             if max_frames > 0 and n >= max_frames:
@@ -276,13 +267,12 @@ def mode_bench(sensor, info, t_start_ns, t_end_ns, max_frames):
 
             d0 = time.perf_counter_ns()
             try:
-                _meta, payload_sz = next(it)
+                payload_sz = next(it)
             except StopIteration:
                 break
             d1 = time.perf_counter_ns()
 
             lat = operator.sub(d1, d0)
-
             if first:
                 ttfb_ns = operator.sub(d1, t0)
                 first = False
@@ -310,9 +300,10 @@ def mode_bench(sensor, info, t_start_ns, t_end_ns, max_frames):
     rps = (float(n) / elapsed_s) if elapsed_s > 0 else 0.0
     bps = (float(total_bytes) / elapsed_s) if elapsed_s > 0 else 0.0
 
-    ru1 = resource.getrusage(resource.RUSAGE_SELF)
-    max_rss_kb = int(ru1.ru_maxrss)
+    max_rss_kb = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
+    sys.stdout.write(f"SUMMARY\ttopic\t{sensor}\n")
+    sys.stdout.write(f"SUMMARY\tsensor_type\t{info.sensor_type}\n")
     sys.stdout.write(f"SUMMARY\trecords\t{n}\n")
     sys.stdout.write(f"SUMMARY\tbytes\t{total_bytes}\n")
     sys.stdout.write(f"SUMMARY\tttfb_ns\t{ttfb_ns}\n")
@@ -325,39 +316,31 @@ def mode_bench(sensor, info, t_start_ns, t_end_ns, max_frames):
     sys.stdout.write(f"SUMMARY\tmax_rss_kb\t{max_rss_kb}\n")
 
 
+def build_arg_parser():
+    p = argparse.ArgumentParser(prog="retrieve_current.py")
+    p.add_argument("sensor_topic", help="sensor topic key from topics yaml")
+    p.add_argument(
+        "max_frames",
+        nargs="?",
+        type=int,
+        default=0,
+        help="optional cap on records, 0 means no cap",
+    )
+    return p
+
+
 def main():
-    if len(sys.argv) < 5:
-        sys.stderr.write(
-            "Usage\n"
-            "  python3 retrieve_report.py sensor_topic t_start_ns t_end_ns mode [max_frames]\n"
-            "mode is list or bench\n"
-        )
-        return 2
-
-    sensor = sys.argv[1]
-    t_start_ns = int(sys.argv[2])
-    t_end_ns = int(sys.argv[3])
-    mode = sys.argv[4]
-    max_frames = int(sys.argv[5]) if len(sys.argv) >= 6 else 0
-
-    if t_end_ns < t_start_ns:
-        raise ValueError("t_end_ns must be >= t_start_ns")
+    args = build_arg_parser().parse_args()
+    sensor = str(args.sensor_topic)
+    max_frames = int(args.max_frames)
 
     topic_map = load_topic_map(TOPIC_MAP_PATH)
     if sensor not in topic_map:
         raise RuntimeError(f"sensor not found in topics yaml: {sensor}")
-
     info = topic_map[sensor]
 
-    if mode == "list":
-        mode_list(sensor, info, t_start_ns, t_end_ns)
-        return 0
-
-    if mode == "bench":
-        mode_bench(sensor, info, t_start_ns, t_end_ns, max_frames)
-        return 0
-
-    raise ValueError("mode must be list or bench")
+    bench_open_current(sensor, info, max_frames)
+    return 0
 
 
 if __name__ == "__main__":

@@ -63,12 +63,76 @@ include_directories(
   ${LIBARCHIVE_INCLUDE_DIRS}
 )
 
-# ========== Image Reduction and Save ==========
+# # ========== File System Benchmark Image Write ==========
+# add_executable(fs_img_write
+#   src/benchmark/img_write_fs_benchmark.cpp
+# )
+
+# target_link_libraries(fs_img_write
+#   ${OpenCV_LIBS}
+#   yaml-cpp
+# )
+
+# ament_target_dependencies(fs_img_write
+#   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
+# )  
+
+# # ========== File System Benchmark Lidar Write ==========
+# add_executable(fs_lidar_write
+#   src/benchmark/lidar_write_fs_benchmark.cpp
+#   src/process/lidar_compress.cpp
+# )
+
+# target_link_libraries(fs_lidar_write
+#   ${PCL_LIBRARIES}
+#   ${PCL_IO_LIBRARIES}
+#   ${LASZIP_LIBRARY}
+#   yaml-cpp
+# )
+
+# ament_target_dependencies(fs_lidar_write
+#    rclcpp sensor_msgs pcl_conversions yaml-cpp
+# )  
+
+
+# # ========== DB Benchmark ==========
+# add_executable(db_benchmark
+#   src/benchmark/db_benchmark.cpp
+# )
+
+# target_include_directories(db_benchmark 
+# PRIVATE
+#   ${SQLITE3_INCLUDE_DIRS}
+#   ${ROCKSDB_INCLUDE_DIRS}
+# )
+
+# target_link_libraries(db_benchmark
+#   ${SQLITE3_LIBRARIES}
+#   ${ROCKSDB_LIBRARIES}
+#   Threads::Threads
+#   dl
+# )
+
+# ========== Archive Move Manager ==========s
+add_executable(archive
+  src/archive/archive.cpp
+  src/logger/topic_map.cpp
+)
+
+target_link_libraries(archive
+  ${SQLITE3_LIBRARIES}
+  yaml-cpp
+  OpenSSL::Crypto
+)
+
+# ========== Image Reduct and Store ==========
 add_executable(image_subscriber
   src/subscriber/image_subscriber.cpp
   src/process/img_dedup.cpp
-  src/process/img_compress.cpp
-  src/db/db_operation.cpp
+  src/logger/append_logger.cpp
+  src/logger/topic_map.cpp
+  src/logger/trip_manager.cpp
+
 )
 
 target_link_libraries(image_subscriber
@@ -81,12 +145,15 @@ ament_target_dependencies(image_subscriber
   rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
 )
 
-# ========== LiDAR Reduction and Save ==========
+# ========== Lidar Downsample and Store ==========
 add_executable(lidar_subscriber
   src/subscriber/lidar_subscriber.cpp
-  src/process/lidar_downsample.cpp
   src/process/lidar_compress.cpp
-  src/db/db_operation.cpp
+  src/process/lidar_downsample.cpp
+  src/logger/append_logger.cpp
+  src/logger/topic_map.cpp
+  src/logger/trip_manager.cpp
+
 )
 
 target_link_libraries(lidar_subscriber
@@ -101,10 +168,13 @@ ament_target_dependencies(lidar_subscriber
   rclcpp sensor_msgs pcl_conversions yaml-cpp
 )
 
-# ========== GPS Subscriber ==========
+# ========== GPS Reduced and Store ==========
 
-add_executable(gps_subscriber 
+add_executable(gps_subscriber
   src/subscriber/gps_subscriber.cpp
+  src/logger/append_logger.cpp
+  src/logger/topic_map.cpp
+  src/logger/trip_manager.cpp 
 )
 
 target_link_libraries(gps_subscriber 
@@ -117,64 +187,13 @@ ament_target_dependencies(gps_subscriber
 ) 
 
 
-# ========== File System Benchmark Image Write ==========
-add_executable(fs_img_write
-  src/benchmark/img_write_fs_benchmark.cpp
-)
-
-target_link_libraries(fs_img_write
-  ${OpenCV_LIBS}
-  yaml-cpp
-)
-
-ament_target_dependencies(fs_img_write
-  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
-)  
-
-# ========== File System Benchmark Lidar Write ==========
-add_executable(fs_lidar_write
-  src/benchmark/lidar_write_fs_benchmark.cpp
-  src/process/lidar_compress.cpp
-)
-
-target_link_libraries(fs_lidar_write
-  ${PCL_LIBRARIES}
-  ${PCL_IO_LIBRARIES}
-  ${LASZIP_LIBRARY}
-  yaml-cpp
-)
-
-ament_target_dependencies(fs_lidar_write
-   rclcpp sensor_msgs pcl_conversions yaml-cpp
-)  
-
-
-# ========== DB Benchmark ==========
-add_executable(db_benchmark
-  src/benchmark/db_benchmark.cpp
-)
-
-target_include_directories(db_benchmark 
-PRIVATE
-  ${SQLITE3_INCLUDE_DIRS}
-  ${ROCKSDB_INCLUDE_DIRS}
-)
-
-target_link_libraries(db_benchmark
-  ${SQLITE3_LIBRARIES}
-  ${ROCKSDB_LIBRARIES}
-  Threads::Threads
-  dl
-)
-
-# ========== Retrieve Visualization CLI ==========
-add_executable(retrieve_cli
+# ========== Retrieve View ==========
+add_executable(retrieve_view
   src/retrieve/retrieve_cli.cpp
   src/retrieve/retrieve_api.cpp
-  src/db/db_operation.cpp
 )
 
-target_link_libraries(retrieve_cli
+target_link_libraries(retrieve_view
   ${OpenCV_LIBS}
   ${PCL_LIBRARIES}
   ${PCL_IO_LIBRARIES}
@@ -183,82 +202,73 @@ target_link_libraries(retrieve_cli
   ${VTK_LIBRARIES}
 )
 
-# PCL needs these sometimes
-add_definitions(${PCL_DEFINITIONS})
-
-# ========== Archive Move Manager ==========
-add_executable(archive_move
-  src/archive/move_manager.cpp
-  src/db/db_operation.cpp
+ament_target_dependencies(retrieve_view
+  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp pcl_conversions
 )
 
-target_link_libraries(archive_move
-  ${LIBARCHIVE_LIBRARIES}
-  ${SQLITE3_LIBRARIES}
-  yaml-cpp
-  OpenSSL::Crypto
+# ========== UDP Offload ==========
+add_executable(offload
+  src/offload/offload.cpp
+  src/retrieve/retrieve_api.cpp
 )
 
-# ========== Prototype Ingest Profile ==========
-add_executable(image_sub_bench
-  src/subscriber/image_sub_bench.cpp
-  src/process/img_dedup.cpp
-  src/process/img_compress.cpp
-  src/db/db_operation.cpp
+ament_target_dependencies(offload
+  rclcpp
 )
-target_link_libraries(image_sub_bench
+
+target_link_libraries(offload
   ${OpenCV_LIBS}
-  ${SQLITE3_LIBRARIES}
-  yaml-cpp
-)
-ament_target_dependencies(image_sub_bench
-  rclcpp sensor_msgs cv_bridge OpenCV yaml-cpp
-)
-
-add_executable(lidar_sub_bench
-  src/subscriber/lidar_sub_bench.cpp
-  src/process/lidar_downsample.cpp
-  src/process/lidar_compress.cpp
-  src/db/db_operation.cpp
-)
-target_link_libraries(lidar_sub_bench
   ${PCL_LIBRARIES}
   ${PCL_IO_LIBRARIES}
   ${LASZIP_LIBRARY}
   ${SQLITE3_LIBRARIES}
+  ${VTK_LIBRARIES}
+)
+
+# ========== Debug Payload Size ==========
+add_executable(debug
+  src/debug/debug.cpp
+  src/retrieve/retrieve_api.cpp
+)
+
+target_link_libraries(debug
+  ${SQLITE3_LIBRARIES}
+)
+
+ament_target_dependencies(debug
+  rclcpp sensor_msgs yaml-cpp 
+)
+
+# ========== Reduction Throughput Report ==========
+add_executable(reduct_report
+  src/prototype_benchmark/reduct_report.cpp
+  src/process/img_dedup.cpp
+  src/process/lidar_compress.cpp
+  src/process/lidar_downsample.cpp
+)
+
+target_link_libraries(reduct_report
+  ${OpenCV_LIBS}
+  ${PCL_LIBRARIES}
+  ${PCL_IO_LIBRARIES}
+  ${LASZIP_LIBRARY}
   yaml-cpp
 )
-ament_target_dependencies(lidar_sub_bench
-  rclcpp sensor_msgs pcl_conversions yaml-cpp
+
+ament_target_dependencies(reduct_report
+  rclcpp sensor_msgs cv_bridge pcl_conversions yaml-cpp
 )
-
-
-
-add_executable(gps_sub_bench 
-  src/subscriber/gps_sub_bench.cpp
-)
-target_link_libraries(gps_sub_bench 
-   ${SQLITE3_LIBRARIES}
-   yaml-cpp
-)
-ament_target_dependencies(gps_sub_bench 
-  rclcpp gps_msgs yaml-cpp
-) 
-
 
 # ========== Install Targets ==========
 install(TARGETS
   image_subscriber
   lidar_subscriber
   gps_subscriber
-  fs_img_write
-  fs_lidar_write
-  db_benchmark
-  retrieve_cli
-  archive_move
-  image_sub_bench
-  lidar_sub_bench
-  gps_sub_bench
+  retrieve_view
+  archive
+  offload
+  debug
+  reduct_report
   DESTINATION lib/${PROJECT_NAME}
 )
 

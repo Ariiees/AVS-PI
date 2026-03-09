@@ -1,0 +1,13 @@
+[Unit]
+Description=AVS power loss recovery (resume only)
+After=network.target
+
+[Service]
+Type=oneshot
+User=avs
+WorkingDirectory=/home/avs/AVS-PI/src/avs/src/prototype_benchmark/power_loss
+ExecStart=/usr/bin/bash /home/avs/AVS-PI/src/avs/src/prototype_benchmark/power_loss/resume_after_reboot.sh
+SuccessExitStatus=1
+
+[Install]
+WantedBy=multi-user.target

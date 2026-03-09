@@ -1,0 +1,586 @@
+#include <arpa/inet.h>
+#include <cerrno>
+#include <climits>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/resource.h>
+#include <sys/uio.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <iostream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include "avs/retrieve_api.h"
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+namespace fs = std::filesystem;
+
+static inline std::uint64_t mono_ns() {
+  using namespace std::chrono;
+  return (std::uint64_t)duration_cast<std::chrono::nanoseconds>(
+           std::chrono::steady_clock::now().time_since_epoch())
+    .count();
+}
+
+static bool recv_all(int fd, void* buf, std::size_t n) {
+  std::uint8_t* p = static_cast<std::uint8_t*>(buf);
+  std::size_t off = 0;
+  while (off < n) {
+    ssize_t rc = ::recv(fd, p + off, n - off, 0);
+    if (rc < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (rc == 0) return false;
+    off += (std::size_t)rc;
+  }
+  return true;
+}
+
+static bool sendmsg_full(int fd, std::vector<iovec>& iov) {
+  std::size_t idx = 0;
+  while (idx < iov.size()) {
+    msghdr msg{};
+    msg.msg_iov = iov.data() + idx;
+    msg.msg_iovlen = iov.size() - idx;
+
+    ssize_t rc = ::sendmsg(fd, &msg, MSG_NOSIGNAL);
+    if (rc < 0) {
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      return false;
+    }
+    if (rc == 0) return false;
+
+    std::size_t remaining = (std::size_t)rc;
+    while (idx < iov.size() && remaining > 0) {
+      if (remaining >= iov[idx].iov_len) {
+        remaining -= iov[idx].iov_len;
+        idx += 1;
+      } else {
+        iov[idx].iov_base = static_cast<char*>(iov[idx].iov_base) + remaining;
+        iov[idx].iov_len -= remaining;
+        remaining = 0;
+      }
+    }
+  }
+  return true;
+}
+
+static std::uint32_t crc32_update(std::uint32_t crc, const std::uint8_t* data, std::size_t n) {
+  static std::uint32_t table[256];
+  static bool init = false;
+  if (!init) {
+    for (std::uint32_t i = 0; i < 256; ++i) {
+      std::uint32_t c = i;
+      for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320U ^ (c >> 1)) : (c >> 1);
+      table[i] = c;
+    }
+    init = true;
+  }
+  std::uint32_t c = crc;
+  for (std::size_t i = 0; i < n; ++i) c = table[(c ^ data[i]) & 0xFFU] ^ (c >> 8);
+  return c;
+}
+
+static std::uint32_t crc32_full(const std::uint8_t* data, std::size_t n) {
+  std::uint32_t c = 0xFFFFFFFFU;
+  c = crc32_update(c, data, n);
+  return c ^ 0xFFFFFFFFU;
+}
+
+static double ns_to_ms(std::uint64_t ns) { return (double)ns / 1e6; }
+static double ns_to_s(std::uint64_t ns) { return (double)ns / 1e9; }
+
+static std::vector<std::string> split_csv(const std::string& s) {
+  std::vector<std::string> out;
+  std::string cur;
+  for (char ch : s) {
+    if (ch == ',') {
+      if (!cur.empty()) out.push_back(cur);
+      cur.clear();
+    } else {
+      cur.push_back(ch);
+    }
+  }
+  if (!cur.empty()) out.push_back(cur);
+  return out;
+}
+
+static double mean(const std::vector<double>& v) {
+  if (v.empty()) return 0.0;
+  double s = 0.0;
+  for (double x : v) s += x;
+  return s / (double)v.size();
+}
+
+static double stdev_sample(const std::vector<double>& v) {
+  if (v.size() < 2) return 0.0;
+  double m = mean(v);
+  double s2 = 0.0;
+  for (double x : v) {
+    double d = x - m;
+    s2 += d * d;
+  }
+  return std::sqrt(s2 / (double)(v.size() - 1));
+}
+
+static double t95(int df) {
+  static const double tab[31] = {
+    0.0,
+    12.706, 4.303, 3.182, 2.776, 2.571,
+    2.447, 2.365, 2.306, 2.262, 2.228,
+    2.201, 2.179, 2.160, 2.145, 2.131,
+    2.120, 2.110, 2.101, 2.093, 2.086,
+    2.080, 2.074, 2.069, 2.064, 2.060,
+    2.056, 2.052, 2.048, 2.045, 2.042
+  };
+  if (df <= 0) return 0.0;
+  if (df < 31) return tab[df];
+  return 1.96;
+}
+
+static double ci_halfwidth95(const std::vector<double>& v) {
+  int n = (int)v.size();
+  if (n < 2) return 0.0;
+  double sd = stdev_sample(v);
+  double tc = t95(n - 1);
+  return tc * sd / std::sqrt((double)n);
+}
+
+static double rusage_cpu_seconds(const rusage& ru) {
+  double u = (double)ru.ru_utime.tv_sec + (double)ru.ru_utime.tv_usec / 1e6;
+  double s = (double)ru.ru_stime.tv_sec + (double)ru.ru_stime.tv_usec / 1e6;
+  return u + s;
+}
+
+static constexpr std::uint32_t kMagic = 0x34535641U;
+static constexpr std::uint16_t kVer = 5;
+
+enum : std::uint16_t {
+  kMsgStart = 1,
+  kMsgRec   = 2,
+  kMsgEnd   = 3,
+  kMsgAck   = 4
+};
+
+#pragma pack(push, 1)
+struct MsgHdr {
+  std::uint32_t magic;
+  std::uint16_t ver;
+  std::uint16_t type;
+  std::uint64_t request_id;
+  std::uint64_t seq;
+  std::uint32_t body_len;
+};
+
+// Start body now includes topic once
+struct StartBodyV2 {
+  std::uint64_t planned_records;
+  std::uint64_t sender_first_ns;
+  std::uint32_t topic_len;
+  std::uint32_t reserved0;
+  // followed by topic bytes topic_len
+};
+
+// Each record entry inside a batch frame
+struct RecEntryHdr {
+  std::uint64_t ts_ns;
+  std::uint32_t payload_len;
+  std::uint32_t crc32;
+  // followed by payload bytes payload_len
+};
+
+struct EndBody {
+  std::uint64_t sender_last_ns;
+  std::uint64_t sent_records_ok;
+  std::uint64_t sent_payload_bytes_ok;
+  std::uint64_t sent_frames;
+  std::uint64_t sent_bytes_total;
+  std::uint64_t last_seq_plus1;
+};
+
+struct AckBody {
+  std::uint64_t sender_first_ns;
+  std::uint64_t server_first_recv_ns;
+  std::uint64_t server_last_recv_ns;
+  std::uint64_t server_ack_send_ns;
+
+  std::uint64_t recv_records_ok;
+  std::uint64_t recv_records_crc_fail;
+  std::uint64_t recv_payload_bytes_ok;
+  std::uint64_t recv_bytes_total;
+
+  std::uint32_t status;
+  std::uint32_t reserved0;
+};
+#pragma pack(pop)
+
+static void usage(const char* p) {
+  std::cerr
+    << "Usage:\n"
+    << "  " << p << " dst_ip dst_port start_ts_ns end_ts_ns topics_csv max_records [runs]\n";
+  std::exit(2);
+}
+
+int main(int argc, char** argv) {
+  if (argc < 7) usage(argv[0]);
+
+  std::string dst_ip = argv[1];
+  int dst_port = std::stoi(argv[2]);
+  std::uint64_t start_ns = std::stoull(argv[3]);
+  std::uint64_t end_ns = std::stoull(argv[4]);
+  std::string topics_csv = argv[5];
+  std::uint64_t max_records = argv[6] ? std::stoull(argv[6]) : 0;
+
+  fs::path ssd_root("/home/avs/DATA/SSD");
+  int runs = 10;
+
+  if (argc >= 8) runs = std::stoi(argv[7]);
+
+  if (dst_ip.empty() || dst_port <= 0 || start_ns == 0 || end_ns == 0 || end_ns < start_ns || topics_csv.empty()) {
+    usage(argv[0]);
+  }
+  if (runs <= 0) runs = 1;
+
+  std::vector<std::string> topics = split_csv(topics_csv);
+  if (topics.size() != 1) {
+    std::cerr << "error this optimized sender currently expects exactly one topic per run\n";
+    return 2;
+  }
+  const std::string topic = topics[0];
+  const std::uint32_t topic_len = (std::uint32_t)topic.size();
+
+  avs::RetrieveAPI api(ssd_root);
+
+  std::string qerr;
+  auto refs = api.QueryRefs(topic, start_ns, end_ns, &qerr);
+  if (refs.empty()) {
+    std::cerr << "warn QueryRefs empty topic=" << topic << " err=" << qerr << "\n";
+  }
+
+  std::uint64_t planned_total = refs.size();
+  if (max_records > 0 && planned_total > max_records) planned_total = max_records;
+
+  std::vector<double> v_latency_ms;
+  std::vector<double> v_goodput_ratio;
+  std::vector<double> v_cpu_pct;
+  std::vector<double> v_throughput_mb_s;
+
+  v_latency_ms.reserve((std::size_t)runs);
+  v_goodput_ratio.reserve((std::size_t)runs);
+  v_cpu_pct.reserve((std::size_t)runs);
+  v_throughput_mb_s.reserve((std::size_t)runs);
+
+  for (int run_i = 0; run_i < runs; ++run_i) {
+    std::uint64_t request_id = mono_ns() ^ (std::uint64_t(::getpid()) << 32) ^ (std::uint64_t)run_i;
+    std::uint64_t seq = 0;
+
+    std::uint64_t bytes_sent_total = 0;
+    std::uint64_t frames_sent = 0;
+    std::uint64_t records_sent_ok = 0;
+    std::uint64_t payload_bytes_sent_ok = 0;
+
+    int s = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) { std::perror("socket"); return 1; }
+
+    int sndbuf = 16 * 1024 * 1024;
+    (void)setsockopt(s, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
+    sockaddr_in dst{};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons((std::uint16_t)dst_port);
+    if (::inet_pton(AF_INET, dst_ip.c_str(), &dst.sin_addr) != 1) {
+      std::cerr << "inet_pton failed\n";
+      ::close(s);
+      return 1;
+    }
+
+    if (::connect(s, (sockaddr*)&dst, sizeof(dst)) != 0) {
+      std::perror("connect");
+      ::close(s);
+      return 1;
+    }
+
+    auto send_frame_simple = [&](std::uint16_t type, const void* body, std::uint32_t body_len) -> bool {
+      MsgHdr h{};
+      h.magic = kMagic;
+      h.ver = kVer;
+      h.type = type;
+      h.request_id = request_id;
+      h.seq = seq;
+      h.body_len = body_len;
+
+      std::vector<iovec> iov;
+      iov.reserve(body_len ? 2 : 1);
+      iov.push_back(iovec{&h, sizeof(h)});
+      if (body_len) iov.push_back(iovec{const_cast<void*>(body), body_len});
+      if (!sendmsg_full(s, iov)) return false;
+
+      frames_sent += 1;
+      bytes_sent_total += (std::uint64_t)sizeof(h) + (std::uint64_t)body_len;
+      seq += 1;
+      return true;
+    };
+
+    std::uint64_t sender_first_ns = mono_ns();
+
+    // Start with topic included once
+    StartBodyV2 sb{};
+    sb.planned_records = planned_total;
+    sb.sender_first_ns = sender_first_ns;
+    sb.topic_len = topic_len;
+    sb.reserved0 = 0;
+
+    {
+      MsgHdr h{};
+      h.magic = kMagic;
+      h.ver = kVer;
+      h.type = kMsgStart;
+      h.request_id = request_id;
+      h.seq = seq;
+      h.body_len = (std::uint32_t)(sizeof(StartBodyV2) + topic_len);
+
+      std::vector<iovec> iov;
+      iov.reserve(topic_len ? 3 : 2);
+      iov.push_back(iovec{&h, sizeof(h)});
+      iov.push_back(iovec{&sb, sizeof(sb)});
+      if (topic_len) iov.push_back(iovec{const_cast<char*>(topic.data()), topic_len});
+
+      if (!sendmsg_full(s, iov)) {
+        std::cerr << "send start failed\n";
+        ::close(s);
+        return 1;
+      }
+
+      frames_sent += 1;
+      bytes_sent_total += (std::uint64_t)sizeof(h) + (std::uint64_t)sizeof(sb) + (std::uint64_t)topic_len;
+      seq += 1;
+    }
+
+    std::vector<std::uint8_t> payload;
+    std::vector<RecEntryHdr> batch_hdrs;
+    std::vector<std::vector<std::uint8_t>> batch_payloads;
+
+    std::uint64_t sent_records = 0;
+
+    rusage ru0{};
+    rusage ru1{};
+    (void)::getrusage(RUSAGE_SELF, &ru0);
+
+    std::uint64_t send_wall_begin = mono_ns();
+
+    std::size_t batch_bytes_used = 0;
+    std::size_t batch_iov_used = 0;
+#ifndef IOV_MAX
+    const std::size_t max_iov = 1024;
+#else
+    const std::size_t max_iov = IOV_MAX;
+#endif
+    const std::size_t max_records_per_batch = (max_iov > 3) ? ((max_iov - 1) / 2) : 1;
+    const std::size_t kMinBatchBytes = 128 * 1024;
+    const std::size_t kMaxBatchBytes = 8 * 1024 * 1024;
+    double avg_payload_bytes = 0.0;
+    batch_hdrs.reserve(max_records_per_batch);
+    batch_payloads.reserve(max_records_per_batch);
+
+    auto target_batch_bytes_for = [&](double avg_bytes) -> std::size_t {
+      if (avg_bytes <= 0.0) return kMinBatchBytes;
+      double target = avg_bytes * 8.0 + 4096.0;
+      if (target < (double)kMinBatchBytes) target = (double)kMinBatchBytes;
+      if (target > (double)kMaxBatchBytes) target = (double)kMaxBatchBytes;
+      return (std::size_t)target;
+    };
+
+    auto flush_batch = [&](bool force) -> bool {
+      if (!force && batch_hdrs.empty()) return true;
+      if (batch_hdrs.empty()) return true;
+
+      MsgHdr h{};
+      h.magic = kMagic;
+      h.ver = kVer;
+      h.type = kMsgRec;
+      h.request_id = request_id;
+      h.seq = seq;
+      h.body_len = (std::uint32_t)batch_bytes_used;
+
+      std::vector<iovec> iov;
+      iov.reserve(1 + batch_iov_used);
+      iov.push_back(iovec{&h, sizeof(h)});
+      for (std::size_t i = 0; i < batch_hdrs.size(); ++i) {
+        iov.push_back(iovec{&batch_hdrs[i], sizeof(RecEntryHdr)});
+        if (!batch_payloads[i].empty()) {
+          iov.push_back(iovec{batch_payloads[i].data(), batch_payloads[i].size()});
+        }
+      }
+
+      if (!sendmsg_full(s, iov)) return false;
+
+      frames_sent += 1;
+      bytes_sent_total += (std::uint64_t)sizeof(h) + (std::uint64_t)batch_bytes_used;
+      seq += 1;
+
+      batch_hdrs.clear();
+      batch_payloads.clear();
+      batch_bytes_used = 0;
+      batch_iov_used = 0;
+      return true;
+    };
+
+    for (const auto& r : refs) {
+      if (max_records > 0 && sent_records >= max_records) break;
+
+      std::string perr;
+      bool ok = api.LoadPayload(r, payload, &perr);
+      if (!ok) continue;
+
+      std::uint32_t crc = 0;
+      if (!payload.empty()) crc = crc32_full(payload.data(), payload.size());
+
+      RecEntryHdr eh{};
+      eh.ts_ns = r.ts_ns;
+      eh.payload_len = (std::uint32_t)payload.size();
+      eh.crc32 = crc;
+
+      std::size_t need = sizeof(RecEntryHdr) + payload.size();
+      if (need > (16u * 1024u * 1024u)) {
+        std::cerr << "warn payload too large to batch\n";
+        continue;
+      }
+
+      if (avg_payload_bytes <= 0.0) {
+        avg_payload_bytes = (double)payload.size();
+      } else {
+        avg_payload_bytes = 0.90 * avg_payload_bytes + 0.10 * (double)payload.size();
+      }
+      std::size_t target_batch_bytes = target_batch_bytes_for(avg_payload_bytes);
+
+      std::size_t record_iov = payload.empty() ? 1 : 2;
+      bool would_exceed = (!batch_hdrs.empty()) &&
+                          ((batch_hdrs.size() >= max_records_per_batch) ||
+                           (batch_bytes_used + need > target_batch_bytes) ||
+                           (1 + batch_iov_used + record_iov > max_iov));
+
+      if (would_exceed) {
+        if (!flush_batch(true)) {
+          std::cerr << "send batch failed\n";
+          break;
+        }
+      }
+
+      batch_hdrs.push_back(eh);
+      batch_payloads.emplace_back(std::move(payload));
+      batch_bytes_used += need;
+      batch_iov_used += record_iov;
+
+      records_sent_ok += 1;
+      payload_bytes_sent_ok += (std::uint64_t)batch_payloads.back().size();
+      sent_records += 1;
+
+      if (batch_hdrs.size() >= max_records_per_batch || batch_bytes_used >= target_batch_bytes) {
+        if (!flush_batch(true)) {
+          std::cerr << "send batch failed\n";
+          break;
+        }
+      }
+    }
+
+    if (!flush_batch(true)) {
+      std::cerr << "send final batch failed\n";
+      ::close(s);
+      return 1;
+    }
+
+    std::uint64_t send_wall_end = mono_ns();
+    (void)::getrusage(RUSAGE_SELF, &ru1);
+
+    EndBody eb{};
+    eb.sender_last_ns = mono_ns();
+    eb.sent_records_ok = records_sent_ok;
+    eb.sent_payload_bytes_ok = payload_bytes_sent_ok;
+    eb.sent_frames = frames_sent;
+    eb.sent_bytes_total = bytes_sent_total;
+    eb.last_seq_plus1 = seq;
+
+    (void)send_frame_simple(kMsgEnd, &eb, sizeof(eb));
+
+    MsgHdr ah{};
+    if (!recv_all(s, &ah, sizeof(ah))) {
+      std::cerr << "recv ack hdr failed\n";
+      ::close(s);
+      return 1;
+    }
+    if (ah.magic != kMagic || ah.ver != kVer || ah.type != kMsgAck || ah.request_id != request_id || ah.body_len != sizeof(AckBody)) {
+      std::cerr << "bad ack hdr\n";
+      ::close(s);
+      return 1;
+    }
+
+    AckBody ack{};
+    if (!recv_all(s, &ack, sizeof(ack))) {
+      std::cerr << "recv ack body failed\n";
+      ::close(s);
+      return 1;
+    }
+
+    std::uint64_t ack_recv_ns = mono_ns();
+
+    (void)::shutdown(s, SHUT_RDWR);
+    ::close(s);
+
+    double send_wall_s = ns_to_s(send_wall_end - send_wall_begin);
+    double cpu_s = rusage_cpu_seconds(ru1) - rusage_cpu_seconds(ru0);
+    double cpu_pct = (send_wall_s > 0.0) ? (100.0 * cpu_s / send_wall_s) : 0.0;
+
+    double latency_ms = ns_to_ms(ack_recv_ns - sender_first_ns);
+    double goodput_ratio = (bytes_sent_total > 0) ? (100.0 * (double)payload_bytes_sent_ok / (double)bytes_sent_total) : 0.0;
+    double throughput_mb_s = (send_wall_s > 0.0) ? ((double)bytes_sent_total / 1e6 / send_wall_s) : 0.0;
+
+    if (ack.status == 0) {
+      v_latency_ms.push_back(latency_ms);
+      v_goodput_ratio.push_back(goodput_ratio);
+      v_cpu_pct.push_back(cpu_pct);
+      v_throughput_mb_s.push_back(throughput_mb_s);
+    } else {
+      std::cerr << "warn run failed run=" << run_i << " ack_status=" << ack.status << "\n";
+    }
+
+    std::cout
+      << "RUN"
+      << " i=" << run_i
+      << " ack_status=" << ack.status
+      << " latency_ms=" << latency_ms
+      << " cpu_pct=" << cpu_pct
+      << " records_sent_ok=" << records_sent_ok
+      << " total_bytes_sent=" << bytes_sent_total
+      << " throughput_mb_s=" << throughput_mb_s
+      << " recv_records_ok=" << ack.recv_records_ok
+      << " crc_fail=" << ack.recv_records_crc_fail
+      << "\n";
+  }
+
+  std::cout
+    << "OFFLOAD_SUM"
+    << " runs_requested=" << runs
+    << " runs_ok=" << v_latency_ms.size()
+    << " goodput_ratio_avg=" << mean(v_goodput_ratio)
+    << " goodput_ratio_ci95=" << ci_halfwidth95(v_goodput_ratio)
+    << " latency_ms_avg=" << mean(v_latency_ms)
+    << " latency_ms_ci95=" << ci_halfwidth95(v_latency_ms)
+    << " cpu_pct_avg=" << mean(v_cpu_pct)
+    << " cpu_pct_ci95=" << ci_halfwidth95(v_cpu_pct)
+    << " wire_throughput_mb_s_avg=" << mean(v_throughput_mb_s)
+    << " wire_throughput_mb_s_ci95=" << ci_halfwidth95(v_throughput_mb_s)
+    << "\n";
+
+  return 0;
+}
