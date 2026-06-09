@@ -13,13 +13,7 @@ AVS is a ROS 2 prototype that transforms transient camera, LiDAR, and GPS stream
 
 The demo shows AVS querying retained vehicle data by sensor topic and time range, including image, LiDAR, and GPS records.
 
-<p align="center">
-  <a href="https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs.webm">
-    <img src="https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs-demo-preview.png" alt="Watch the AVS query demo" width="640">
-  </a>
-</p>
-
-[Open or download the AVS query demo](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs.webm)
+[Watch the AVS query demo (MP4)](https://github.com/Ariiees/AVS-PI/blob/main/img/avs.mp4)
 
 ## System Overview
 
