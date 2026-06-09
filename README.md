@@ -287,7 +287,3 @@ These results describe the paper's evaluated hardware, sensors, traces, and conf
 ## Current Prototype Scope
 
 AVS is a research prototype. The evaluated implementation handles one camera, one LiDAR, and one GPS stream; uses fixed, dataset-calibrated reduction policies; and provides prefix-durable append recovery rather than full transactional isolation. Review the code and configuration before using it for production or safety-critical workloads.
-
-## License
-
-The ROS 2 package metadata declares Apache License 2.0. Add the corresponding repository-level license file before redistributing the project.
