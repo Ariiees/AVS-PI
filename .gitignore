@@ -1,0 +1,34 @@
+# ROS 2 / colcon workspace outputs
+/build/
+/install/
+/log/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# Compiled artifacts
+*.a
+*.o
+*.so
+*.so.*
+
+# Python environments and caches
+/.venv/
+/venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local editor and OS files
+/.vscode/
+/.idea/
+*.swp
+*~
+.DS_Store

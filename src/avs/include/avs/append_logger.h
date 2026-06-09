@@ -7,6 +7,8 @@
 #include <fstream>
 #include <sqlite3.h>
 
+#include "avs/storage_logger.h"
+
 namespace avs {
 
 #pragma pack(push,1)
@@ -37,19 +39,22 @@ struct RecordHeader {
 };
 #pragma pack(pop)
 
-class AppendLogger {
+class AppendLogger : public StorageLogger {
 public:
   AppendLogger(const std::string &ssd_root, const std::string &topic);
-  ~AppendLogger();
+  ~AppendLogger() override;
 
   // Start a trip: creates directory, opens files, inserts global row (end_ts_ns = 0)
-  void startTrip(const std::string &day, const std::string &topic_folder, int trip_id, uint64_t start_ts_ns);
+  void startTrip(const std::string &day,
+                 const std::string &topic_folder,
+                 int trip_id,
+                 uint64_t start_ts_ns) override;
 
   // Append a record (encoded payload). Thread-safe.
-  void appendRecord(uint64_t ts_ns, const std::vector<uint8_t> &payload);
+  void appendRecord(uint64_t ts_ns, const std::vector<uint8_t> &payload) override;
 
   // End a trip: flush pending chunk, update global end_ts_ns, close files.
-  void endTrip(uint64_t end_ts_ns);
+  void endTrip(uint64_t end_ts_ns) override;
 
   // optional tuning for chunk size
   void setChunkTargetBytes(size_t bytes) { chunk_target_bytes_ = bytes; }

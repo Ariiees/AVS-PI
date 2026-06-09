@@ -3,7 +3,7 @@
 #include "std_msgs/msg/int64.hpp"
 #include "avs/img_dedup.h"
 #include "avs/common.h"
-#include "avs/append_logger.h"
+#include "avs/storage_logger.h"
 #include "avs/trip_manager.h"
 #include "avs/topic_map.h"
 #include <cv_bridge/cv_bridge.hpp>
@@ -29,9 +29,12 @@ public:
   {
     this->declare_parameter<std::string>("config_path", "/home/avs/AVS-PI/src/avs/config/avs_config.yaml");
     this->declare_parameter<std::string>("topic_map_path", "/home/avs/AVS-PI/src/avs/config/topics.yaml");
+    this->declare_parameter<std::string>("storage_backend", "append");
 
     std::string config_path    = this->get_parameter("config_path").as_string();
     std::string topic_map_path = this->get_parameter("topic_map_path").as_string();
+    storage_backend_ = avs::NormalizeStorageBackend(
+      this->get_parameter("storage_backend").as_string());
 
     YAML::Node root   = YAML::LoadFile(config_path);
     YAML::Node common = root["common"];
@@ -44,7 +47,8 @@ public:
       avs::GetTopicFolder(avs::LoadTopicMap(topic_map_path), image_topic_);
     std::string current_day = avs::getCurrentDayFolder();
 
-    image_path_ = (fs::path(ssd_root) / fs::path(folder_name) / fs::path(current_day)).string();
+    image_path_ = avs::StorageTopicDayDir(
+      storage_backend_, fs::path(ssd_root), folder_name, current_day).string();
     if (!avs::ensureDirectory(image_path_, &ec)) {
       RCLCPP_WARN(this->get_logger(),
                   "Image directory %s did not exist. Attempted to create it (ec=%d: %s).",
@@ -55,7 +59,7 @@ public:
 
     deduplicator_ = std::make_shared<ImgDeduplicator>(image_path_, config_path);
     trip_mgr_     = std::make_shared<TripManager>();
-    append_logger_ = std::make_shared<avs::AppendLogger>(ssd_root, image_topic_);
+    storage_logger_ = avs::CreateStorageLogger(storage_backend_, ssd_root, image_topic_);
 
     int trip_id = trip_mgr_->GetTripId(image_path_);
 
@@ -63,7 +67,7 @@ public:
       std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
 
-    append_logger_->startTrip(current_day, folder_name, trip_id, trip_start_ns);
+    storage_logger_->startTrip(current_day, folder_name, trip_id, trip_start_ns);
 
     subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
       image_topic_, rclcpp::SensorDataQoS(),
@@ -72,8 +76,9 @@ public:
     // latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/image_latency_us", 10);
 
     RCLCPP_INFO(this->get_logger(),
-                "AVS Image node started. Subscribed to %s; writing to append-logger (path=%s trip=%s)",
-                image_topic_.c_str(), image_path_.c_str(), std::to_string(trip_id).c_str());
+                "AVS Image node started. backend=%s topic=%s path=%s trip=%s",
+                storage_backend_.c_str(), image_topic_.c_str(), image_path_.c_str(),
+                std::to_string(trip_id).c_str());
   }
 
   ~ImgProcessNode() override
@@ -83,7 +88,7 @@ public:
       std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
     try {
-      if (append_logger_) append_logger_->endTrip(trip_end_ns);
+      if (storage_logger_) storage_logger_->endTrip(trip_end_ns);
     } catch (...) {}
   }
 
@@ -111,9 +116,9 @@ private:
       //                + static_cast<uint64_t>(msg->header.stamp.nanosec);
 
       try {
-        append_logger_->appendRecord(ts_ns, payload);
+        storage_logger_->appendRecord(ts_ns, payload);
       } catch (const std::exception &e) {
-        RCLCPP_ERROR(this->get_logger(), "AppendLogger appendRecord failed: %s", e.what());
+        RCLCPP_ERROR(this->get_logger(), "Storage appendRecord failed: %s", e.what());
       }
 
       // const auto t1 = std::chrono::steady_clock::now();
@@ -128,11 +133,12 @@ private:
 private:
   std::string image_topic_;
   std::string image_path_;
+  std::string storage_backend_;
 
   std::error_code ec;
 
   std::shared_ptr<ImgDeduplicator> deduplicator_;
-  std::shared_ptr<avs::AppendLogger> append_logger_;
+  std::shared_ptr<avs::StorageLogger> storage_logger_;
   std::shared_ptr<avs::TripManager> trip_mgr_;
 
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_;

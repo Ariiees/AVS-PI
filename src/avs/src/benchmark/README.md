@@ -33,8 +33,24 @@ sudo ./hdd_tar_bench.sh \
 
 
 # Run DB Benchmark
-ros2 run avs db_benchmark 
-(optional)  [--images DIR] [--lidar DIR] [--sqlite FILE] [--rocks DIR]  [--ranges 1000] [--window-ms 1000]
+ros2 run avs db_benchmark
+(required) --duration 120
+(optional) [--sensors camera,lidar,gps]
+           [--camera-topic TOPIC] [--lidar-topic TOPIC] [--gps-topic TOPIC]
+           [--config-path FILE] [--topic-map-path FILE]
+           [--out-root DIR] [--capture-file FILE]
+           [--sqlite FILE] [--rocks DIR] [--append-root DIR]
+           [--ranges 1000] [--window-ms 1000]
+
+The benchmark subscribes once to the live ROS2 topics, captures one identical
+processed message stream, then benchmarks `SQLite`, `RocksDB`, and the custom
+append-only logger sequentially. That avoids making the three backends contend
+with each other on the Pi while still using the same ROS2 message input.
+
+It prints a markdown table with:
+- average insert latency
+- average range-query latency
+- final on-disk size
 
 
 # Run Prototype Benchmark

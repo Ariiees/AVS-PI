@@ -180,6 +180,8 @@ def main():
     ap.add_argument("--attach", action="store_true", help="Attach to existing processes instead of launching them")
     ap.add_argument("--csv", type=Path, default=None, help="Optional CSV output path for per-sample totals")
     ap.add_argument("--namespace", default="", help="Optional ROS namespace to pass when launching")
+    ap.add_argument("--storage-backend", default="append", choices=["append", "rocksdb"],
+                    help="Edge storage backend to benchmark.")
     args = ap.parse_args()
 
     popens = []
@@ -200,9 +202,12 @@ def main():
                 os.environ["ROS_NAMESPACE"] = args.namespace
 
             cmds = [
-                ["ros2", "run", "avs", "image_subscriber"],
-                ["ros2", "run", "avs", "lidar_subscriber"],
-                ["ros2", "run", "avs", "gps_subscriber"],
+                ["ros2", "run", "avs", "image_subscriber", "--ros-args", "-p",
+                 f"storage_backend:={args.storage_backend}"],
+                ["ros2", "run", "avs", "lidar_subscriber", "--ros-args", "-p",
+                 f"storage_backend:={args.storage_backend}"],
+                ["ros2", "run", "avs", "gps_subscriber", "--ros-args", "-p",
+                 f"storage_backend:={args.storage_backend}"],
             ]
 
             for c in cmds:
@@ -295,6 +300,9 @@ def main():
         print("-----------------------------------------------")
         print("CPU% / Memory (RSS MB):  (summed over all subscriber process trees)")
         print(f"  avg {cpu_avg}% (max {cpu_max}%), RSS avg {rss_avg} MB (max {rss_max} MB)")
+        print("-----------------------------------------------")
+        print("Storage backend:")
+        print(f"  backend:             {args.storage_backend}")
         print("-----------------------------------------------")
         print("Data size growth (MB):")
         print(f"  +{size_delta_mb} MB (total {human_mb(size_after)} MB in {SSD_ROOT})")

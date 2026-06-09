@@ -4,7 +4,7 @@
 #include "yaml-cpp/yaml.h"
 
 #include "avs/common.h"
-#include "avs/append_logger.h"
+#include "avs/storage_logger.h"
 #include "avs/topic_map.h"
 #include "avs/trip_manager.h"
 
@@ -27,9 +27,12 @@ public:
   {
     this->declare_parameter<std::string>("config_path", "/home/avs/AVS-PI/src/avs/config/avs_config.yaml");
     this->declare_parameter<std::string>("topic_map_path", "/home/avs/AVS-PI/src/avs/config/topics.yaml");
+    this->declare_parameter<std::string>("storage_backend", "append");
 
     std::string config_path = this->get_parameter("config_path").as_string();
     std::string topic_map_path = this->get_parameter("topic_map_path").as_string();
+    storage_backend_ = avs::NormalizeStorageBackend(
+      this->get_parameter("storage_backend").as_string());
 
     YAML::Node root   = YAML::LoadFile(config_path);
     YAML::Node common = root["common"];
@@ -45,7 +48,8 @@ public:
     std::string current_day = avs::getCurrentDayFolder();
 
     
-    gps_path_ = (fs::path(ssd_root) / fs::path(folder_name) / fs::path(current_day)).string();
+    gps_path_ = avs::StorageTopicDayDir(
+      storage_backend_, fs::path(ssd_root), folder_name, current_day).string();
 
     if (!avs::ensureDirectory(gps_path_, &ec)) {
       RCLCPP_WARN(
@@ -57,7 +61,7 @@ public:
     }
 
     trip_mgr_     = std::make_shared<TripManager>();
-    append_logger_ = std::make_shared<avs::AppendLogger>(ssd_root, gps_topic_);
+    storage_logger_ = avs::CreateStorageLogger(storage_backend_, ssd_root, gps_topic_);
 
     int trip_id = trip_mgr_->GetTripId(gps_path_);
 
@@ -65,7 +69,7 @@ public:
       std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
 
-    append_logger_->startTrip(current_day, folder_name, trip_id, trip_start_ns);
+    storage_logger_->startTrip(current_day, folder_name, trip_id, trip_start_ns);
 
 
     subscription_ = this->create_subscription<gps_msgs::msg::GPSFix>(
@@ -75,8 +79,9 @@ public:
     // latency_pub_ = this->create_publisher<std_msgs::msg::Int64>("/avs/gps_latency_us", 10);
 
     RCLCPP_INFO(this->get_logger(),
-                "AVS GPS node started. Subscribed to %s; writing to append-logger (path=%s trip=%s)",
-                gps_topic_.c_str(), gps_path_.c_str(), std::to_string(trip_id).c_str());
+                "AVS GPS node started. backend=%s topic=%s path=%s trip=%s",
+                storage_backend_.c_str(), gps_topic_.c_str(), gps_path_.c_str(),
+                std::to_string(trip_id).c_str());
   }
 
   ~GpsProcessNode() override {
@@ -85,7 +90,7 @@ public:
       std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
     try {
-      if (append_logger_) append_logger_->endTrip(trip_end_ns);
+      if (storage_logger_) storage_logger_->endTrip(trip_end_ns);
     } catch (...) {}
   }
 
@@ -125,7 +130,7 @@ private:
     std::memcpy(payload.data(), &gp, sizeof(GpsPayload));
 
     try {
-      append_logger_->appendRecord(ts_ns, payload);
+      storage_logger_->appendRecord(ts_ns, payload);
       // const auto t1 = std::chrono::steady_clock::now();
       // const auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
       // std_msgs::msg::Int64 m;
@@ -148,13 +153,14 @@ private:
 
   std::string gps_topic_;
   std::string gps_path_;
+  std::string storage_backend_;
   bool downscale_;
   int downscale_frequency_; // hz
   int records_count_ = 0;
 
   std::error_code ec;
 
-  std::shared_ptr<avs::AppendLogger> append_logger_;
+  std::shared_ptr<avs::StorageLogger> storage_logger_;
   std::shared_ptr<avs::TripManager> trip_mgr_;
 
   rclcpp::Subscription<gps_msgs::msg::GPSFix>::SharedPtr subscription_;

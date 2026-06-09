@@ -7,8 +7,9 @@
 
 # Reduction throughput report (live topics, no ros2bag/file output)
 ```
-./reduct_report.py --duration 30 --sensors camera,lidar \
+./reduct_report.py --duration 30 --sensors camera,lidar,gps \
   --camera-topic /my_camera/pylon_ros2_camera_node/image_raw \
+  --gps-topic /novatel/oem7/gps \
   --lidar-topic /sensing/lidar/top/pointcloud
 ```
 

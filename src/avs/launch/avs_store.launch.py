@@ -10,11 +10,18 @@ def generate_launch_description():
         default_value="",
         description="Optional ROS namespace for all three subscribers",
     )
+    backend_arg = DeclareLaunchArgument(
+        "storage_backend",
+        default_value="append",
+        description="Storage backend: append or rocksdb",
+    )
 
     ns = LaunchConfiguration("namespace")
+    storage_backend = LaunchConfiguration("storage_backend")
 
     return LaunchDescription([
         ns_arg,
+        backend_arg,
 
         Node(
             package="avs",
@@ -22,6 +29,7 @@ def generate_launch_description():
             name="image_subscriber",
             namespace=ns,
             output="screen",
+            parameters=[{"storage_backend": storage_backend}],
         ),
         Node(
             package="avs",
@@ -29,6 +37,7 @@ def generate_launch_description():
             name="lidar_subscriber",
             namespace=ns,
             output="screen",
+            parameters=[{"storage_backend": storage_backend}],
         ),
         Node(
             package="avs",
@@ -36,5 +45,6 @@ def generate_launch_description():
             name="gps_subscriber",
             namespace=ns,
             output="screen",
+            parameters=[{"storage_backend": storage_backend}],
         ),
     ])
