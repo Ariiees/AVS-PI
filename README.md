@@ -1,6 +1,7 @@
-![CAR Lab logo](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/CARLab-logo.png)
-
-<h1 align="center">Autonomous Vehicle Storage (AVS)</h1>
+<h1 align="center">
+  <img src="https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/CARLab-logo.png" alt="CAR Lab logo" width="56" align="absmiddle">
+  Autonomous Vehicle Storage (AVS)
+</h1>
 
 <p align="center">
   Computational and hierarchical onboard data management for autonomous vehicle streams
