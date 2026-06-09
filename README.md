@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="img/CARLab-logo.png" alt="CAR Lab logo" width="180">
-</p>
+![CAR Lab logo](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/CARLab-logo.png)
 
 <h1 align="center">Autonomous Vehicle Storage (AVS)</h1>
 
@@ -22,9 +20,9 @@ AVS is a ROS 2 prototype that transforms transient camera, LiDAR, and GPS stream
 
 The demo shows AVS querying retained vehicle data by sensor topic and time range, including image, LiDAR, and GPS records.
 
-<video src="img/avs.webm" controls width="900"></video>
+[![Watch the AVS query demo](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs-demo-preview.png)](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs.webm)
 
-<!-- [Open or download the AVS query demo](img/avs.webm) -->
+[Open or download the AVS query demo](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs.webm)
 
 ## System Overview
 
@@ -65,11 +63,9 @@ The evaluated vehicle workload contains a 10 Hz Hesai Pandar64 LiDAR, a 10 Hz Ba
 
 AVS runs on a separate computing unit so data processing and storage do not interfere with the vehicle's safety-critical main computer. The vehicle publishes ROS 2 sensor topics over Ethernet; the Raspberry Pi processes and stores recent data on NVMe, then archives older data to the USB-connected HDD.
 
-<p align="center">
-  <img src="img/hydraD.png" alt="AVS hardware connection diagram" width="900">
-</p>
+[![AVS hardware connection diagram](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/hydraD.png)](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/hydraD.png)
 
-<!-- [Open the original hardware connection figure](img/hydraD.pdf) -->
+[Open the original hardware connection figure](https://github.com/Ariiees/AVS-PI/blob/main/img/hydraD.pdf)
 
 Before running AVS:
 
