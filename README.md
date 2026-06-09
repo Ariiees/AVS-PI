@@ -9,19 +9,15 @@
 
 AVS is a ROS 2 prototype that transforms transient camera, LiDAR, and GPS streams into compact, long-horizon, queryable vehicle history. It performs modality-aware reduction during ingest, writes processed records to an append-only SSD hot tier, and archives completed topic-days into indexed tar files on an HDD cold tier. Both tiers support time-range queries.
 
-<!-- This repository accompanies the paper:
-
-> Yuxin Wang, Yuankai He, Damien Kah, and Weisong Shi.
->
-> **Computational and Hierarchical Onboard Data Management for Autonomous Vehicle Streams.**
-
-[Read the paper](img/AVS_ICDE27.pdf) -->
-
 ## Demo
 
 The demo shows AVS querying retained vehicle data by sensor topic and time range, including image, LiDAR, and GPS records.
 
-[![Watch the AVS query demo](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs-demo-preview.png)](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs.webm)
+<p align="center">
+  <a href="https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs.webm">
+    <img src="https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs-demo-preview.png" alt="Watch the AVS query demo" width="640">
+  </a>
+</p>
 
 [Open or download the AVS query demo](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/avs.webm)
 
@@ -65,8 +61,6 @@ The evaluated vehicle workload contains a 10 Hz Hesai Pandar64 LiDAR, a 10 Hz Ba
 AVS runs on a separate computing unit so data processing and storage do not interfere with the vehicle's safety-critical main computer. The vehicle publishes ROS 2 sensor topics over Ethernet; the Raspberry Pi processes and stores recent data on NVMe, then archives older data to the USB-connected HDD.
 
 [![AVS hardware connection diagram](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/hydraD.png)](https://raw.githubusercontent.com/Ariiees/AVS-PI/main/img/hydraD.png)
-
-[Open the original hardware connection figure](https://github.com/Ariiees/AVS-PI/blob/main/img/hydraD.pdf)
 
 Before running AVS:
 
@@ -279,7 +273,7 @@ These results describe the paper's evaluated hardware, sensors, traces, and conf
 
 ```text
 .
-├── img/                         # Paper, logo, hardware figure, and demo
+├── img/                         # Logo, hardware figure, and demo media
 ├── setup.bash                   # Native dependency installer
 └── src/avs/
     ├── config/                  # Topics, storage roots, and processing policy
