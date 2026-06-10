@@ -147,7 +147,7 @@ Replace `image_subscriber` with `lidar_subscriber` or `gps_subscriber` as needed
 
 ## Query Retained Data
 
-Queries use a sensor topic and an inclusive nanosecond timestamp range. The interactive viewer queries the SSD hot-tier catalog. Use `cold_retrive_report.py`, described under [Paper Benchmarks](#paper-benchmarks), for direct indexed queries over HDD archives.
+Queries use a sensor topic and an inclusive nanosecond timestamp range. The interactive viewer queries the SSD hot-tier catalog. Use `cold_retrieve_report.py`, described under [Paper Benchmarks](#paper-benchmarks), for direct indexed queries over HDD archives.
 
 ```bash
 # Image query
@@ -166,7 +166,7 @@ ros2 run avs retrieve_view \
   --start <start_ts_ns> --end <end_ts_ns> --gps
 ```
 
-The image viewer uses arrow keys, the LiDAR viewer uses `a`/`d`, and the GPS viewer uses `p`/`n`. Press `q` to exit.
+The image and LiDAR viewers use `n` or the right arrow for next and `p` or the left arrow for previous. The GPS viewer draws the complete trajectory for the requested time range; move the mouse over the line to inspect each GPS record. Press `q` to exit.
 
 ## Archive to the HDD Tier
 
@@ -194,8 +194,8 @@ Run benchmark scripts from their containing directories after sourcing ROS 2 and
 | Logger backend comparison | `ros2 run avs db_benchmark` | Compares SQLite, RocksDB, and append-only ingest/query behavior on one captured stream |
 | End-to-end ingest | `avs_report.py` and `rosbag_report.py` | Compares AVS resource use and footprint with rosbag2 |
 | SSD/HDD behavior | `src/avs/src/benchmark/*.sh` | Measures SSD reads, archive writes, and HDD sequential reads |
-| Hot/open-trip queries | `retrive_report.py` and `retrive_current.py` | Measures time-range retrieval over SSD logs |
-| Cold queries | `cold_retrive_report.py` | Measures direct retrieval from indexed HDD tar archives |
+| Hot/open-trip queries | `retrieve_report.py` and `retrieve_current.py` | Measures time-range retrieval over SSD logs |
+| Cold queries | `cold_retrieve_report.py` | Measures direct retrieval from indexed HDD tar archives |
 | Archival | `archive_report.py` | Measures topic-day migration from SSD to HDD |
 | Power-loss recovery | `src/avs/src/prototype_benchmark/power_loss/` | Reboots during ingest and validates prefix recovery |
 | Selective offload | `ros2 run avs offload ...` | Retrieves and streams one selected topic/time range |
@@ -217,10 +217,10 @@ cd /home/avs/AVS-PI/src/avs/src/prototype_benchmark
 ./rosbag_report.py --duration 648 --compression --storage-id mcap
 
 # Closed-trip SSD query
-python3 retrive_report.py /novatel/oem7/gps <start_ts_ns> <end_ts_ns> bench 1000
+python3 retrieve_report.py /novatel/oem7/gps <start_ts_ns> <end_ts_ns> bench 1000
 
 # HDD archive query
-python3 cold_retrive_report.py /sensing/lidar/top/pointcloud \
+python3 cold_retrieve_report.py /sensing/lidar/top/pointcloud \
   <start_ts_ns> <end_ts_ns> bench 2000
 
 # Archive benchmark

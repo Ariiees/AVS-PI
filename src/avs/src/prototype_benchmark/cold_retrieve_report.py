@@ -450,7 +450,7 @@ def main() -> int:
     if len(sys.argv) < 5:
         sys.stderr.write(
             "Usage\n"
-            "  ./cold_query_bench.py sensor_topic t_start_ns t_end_ns mode [max_frames]\n"
+            "  python3 cold_retrieve_report.py sensor_topic t_start_ns t_end_ns mode [max_frames]\n"
             "mode is list or bench\n"
         )
         return 2

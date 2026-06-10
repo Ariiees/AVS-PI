@@ -1,5 +1,6 @@
 #include "avs/retrieve_api.h"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <tuple>
@@ -232,6 +233,10 @@ std::vector<DataRef> RetrieveAPI::QueryRefs(const std::string& topic,
       }
     }
   }
+
+  std::sort(refs.begin(), refs.end(), [](const DataRef& lhs, const DataRef& rhs) {
+    return lhs.ts_ns < rhs.ts_ns;
+  });
 
   return refs;
 }

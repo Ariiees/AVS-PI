@@ -104,7 +104,7 @@ apt-get install -y --no-install-recommends \
   libssl-dev
 
 # ============================================================
-# 4) VTK stack (used by avs_retrieve_view)
+# 4) VTK stack (used by retrieve_view)
 # ============================================================
 log "Installing VTK and OpenGL runtime dependencies (for viewer)"
 apt-get install -y --no-install-recommends \

@@ -1,20 +1,57 @@
-# ENV SET
-If you are using pi, please set the following environment parameter in current terminal.
+# Retrieve Retained Data
 
-```
-export LIBGL_ALWAYS_SOFTWARE=1
-```
-# list
+The installed interactive retrieve executable is `retrieve_view`. It queries the SSD hot-tier catalog by sensor topic and inclusive nanosecond timestamp range.
 
-Will list recorded data with sensor_id (default is topic name), data_type (image defalut is jpg, lidar default is laz), timestamp in 13 digitals ms and stored path.
+Build and source the workspace before running it:
 
+```bash
+cd /home/avs/AVS-PI
+colcon build --packages-select avs
+source install/setup.bash
 ```
-ros2 run avs retrieve_cli --data image --start 2025-8-20_15-59 --end 2025-8-20_16-00 --list
-ros2 run avs retrieve_cli --data lidar --start 2025-8-20_15-59 --end 2025-8-20_16-00 --list
+
+## Interactive Viewer
+
+```bash
+# Image
+ros2 run avs retrieve_view \
+  --topic /my_camera/pylon_ros2_camera_node/image_raw \
+  --start <start_ts_ns> --end <end_ts_ns> --image
+
+# LiDAR
+ros2 run avs retrieve_view \
+  --topic /sensing/lidar/top/pointcloud \
+  --start <start_ts_ns> --end <end_ts_ns> --lidar
+
+# GPS
+ros2 run avs retrieve_view \
+  --topic /novatel/oem7/gps \
+  --start <start_ts_ns> --end <end_ts_ns> --gps
 ```
-# view
-Will display all the data in the start to end time range.
-```
-ros2 run avs retrieve_cli --data lidar --start 2025-8-20_15-59 --end 2025-8-20_16-00 --list
-ros2 run avs retrieve_cli --data image --start 2025-8-20_15-59 --end 2025-8-20_16-00 --view
+
+Image and LiDAR controls:
+
+- Next frame: `n` or right arrow
+- Previous frame: `p` or left arrow
+- Quit: `q`
+
+The GPS viewer draws the complete trajectory for the requested range. Move the mouse over the trajectory to inspect a GPS record, and press `q` to quit.
+
+## Query Reports
+
+The query report scripts are benchmark and listing tools, not interactive viewers:
+
+```bash
+cd /home/avs/AVS-PI/src/avs/src/prototype_benchmark
+
+# List or benchmark records from closed SSD trips
+python3 retrieve_report.py <sensor_topic> <start_ts_ns> <end_ts_ns> list
+python3 retrieve_report.py <sensor_topic> <start_ts_ns> <end_ts_ns> bench [max_frames]
+
+# Benchmark the current open SSD trip
+python3 retrieve_current.py <sensor_topic> [max_frames]
+
+# List or benchmark records from indexed HDD archives
+python3 cold_retrieve_report.py <sensor_topic> <start_ts_ns> <end_ts_ns> list
+python3 cold_retrieve_report.py <sensor_topic> <start_ts_ns> <end_ts_ns> bench [max_frames]
 ```

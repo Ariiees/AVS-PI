@@ -213,7 +213,7 @@ ament_target_dependencies(gps_subscriber
 
 # ========== Retrieve View ==========
 add_executable(retrieve_view
-  src/retrieve/retrieve_cli.cpp
+  src/retrieve/retrieve_view.cpp
   src/retrieve/retrieve_api.cpp
 )
 
