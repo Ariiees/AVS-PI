@@ -7,13 +7,14 @@
   Computational and hierarchical onboard data management for autonomous vehicle streams
 </p>
 
-AVS is a ROS 2 prototype that transforms transient camera, LiDAR, and GPS streams into compact, long-horizon, queryable vehicle history. It performs modality-aware reduction during ingest, writes processed records to an append-only SSD hot tier, and archives completed topic-days into indexed tar files on an HDD cold tier. Both tiers support time-range queries.
+AVS is a ROS 2 prototype that transforms transient AV sensor streams into compact, long-horizon, queryable vehicle history. It performs modality-aware reduction during ingest, writes processed records to an append-only SSD hot tier, and archives completed topic-days into indexed tar files on an HDD cold tier. Both tiers support time-range queries.
 
 ## Demo
 
 The demo shows AVS querying retained vehicle data by sensor topic and time range, including image, LiDAR, and GPS records.
 
-[Watch the AVS query demo (MP4)](https://github.com/Ariiees/AVS-PI/blob/main/img/avs.mp4)
+[avs.webm](https://github.com/user-attachments/assets/179f0a07-9cd4-4621-8da9-5c4f993d8ab6)
+
 
 ## System Overview
 
@@ -23,7 +24,7 @@ AVS addresses three vehicle-data management requirements:
 2. **Sustained ingest:** chunk-indexed append-only trip logs minimize random writes and write amplification.
 3. **Queryable retention:** recent records remain on SSD while older topic-days are archived to HDD as directly queryable indexed tar files.
 
-The current prototype uses these paper-selected defaults:
+The current prototype uses these defaults:
 
 | Modality | Ingest processing | Default |
 |---|---|---|
@@ -287,3 +288,8 @@ These results describe the paper's evaluated hardware, sensors, traces, and conf
 ## Current Prototype Scope
 
 AVS is a research prototype. The evaluated implementation handles one camera, one LiDAR, and one GPS stream; uses fixed, dataset-calibrated reduction policies; and provides prefix-durable append recovery rather than full transactional isolation. Review the code and configuration before using it for production or safety-critical workloads.
+
+## Acknowledgements
+
+This work was supported in part by Western Digital and by the National Science Foundation Grant. We thank Western Digital for their support and feedback on the storage-system design and prototype evaluation. Any opinions, findings, conclusions, or recommendations expressed in this repository are those of the authors and do not necessarily reflect the views of Western Digital or the National Science Foundation.
+
